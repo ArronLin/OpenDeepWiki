@@ -8,6 +8,7 @@ using OpenDeepWiki.Models;
 using System.IO.Compression;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
+using OpenDeepWiki.Services.Auth;
 using OpenDeepWiki.Services.Graphify;
 
 namespace OpenDeepWiki.Services.Repositories;
@@ -19,7 +20,8 @@ public class RepositoryDocsService(
     IGitPlatformService gitPlatformService,
     ICache cache,
     IGraphifyArtifactService graphifyArtifactService,
-    IRepositorySkillMarkdownBuilder skillMarkdownBuilder)
+    IRepositorySkillMarkdownBuilder skillMarkdownBuilder,
+    IUserContext userContext)
 {
     private const string FallbackLanguageCode = "zh"; // 当没有默认语言标记时的回退语言
     private const int ExportRateLimitMinutes = 5; // 导出限流：5分钟内只能导出一次
@@ -142,6 +144,8 @@ public class RepositoryDocsService(
             };
         }
 
+        var canControl = CanControlRepository(repository);
+
         // 仓库正在处理中或等待处理
         if (repository.Status == RepositoryStatus.Pending || repository.Status == RepositoryStatus.Processing)
         {
@@ -151,6 +155,7 @@ public class RepositoryDocsService(
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
+                CanControl = canControl,
                 Nodes = []
             };
         }
@@ -165,6 +170,7 @@ public class RepositoryDocsService(
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
+                CanControl = canControl,
                 Nodes = []
             };
         }
@@ -179,6 +185,7 @@ public class RepositoryDocsService(
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
+                CanControl = canControl,
                 CurrentBranch = branchEntity.BranchName,
                 HasGraphifyArtifact = graphifyState.HasArtifact,
                 GraphifyStatus = graphifyState.Status,
@@ -202,6 +209,7 @@ public class RepositoryDocsService(
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
+                CanControl = canControl,
                 CurrentBranch = branchEntity.BranchName,
                 CurrentLanguage = language.LanguageCode,
                 HasGraphifyArtifact = graphifyState.HasArtifact,
@@ -221,6 +229,7 @@ public class RepositoryDocsService(
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
+                CanControl = canControl,
                 CurrentBranch = branchEntity.BranchName,
                 CurrentLanguage = language.LanguageCode,
                 HasGraphifyArtifact = graphifyState.HasArtifact,
@@ -249,12 +258,25 @@ public class RepositoryDocsService(
             Nodes = rootNodes,
             Exists = true,
             Status = repository.Status,
+            CanControl = canControl,
             CurrentBranch = branchEntity.BranchName,
             CurrentLanguage = language.LanguageCode,
             HasGraphifyArtifact = graphifyState.HasArtifact,
             GraphifyStatus = graphifyState.Status,
             GraphifyStatusName = graphifyState.StatusName
         };
+    }
+
+    private bool CanControlRepository(Repository repository)
+    {
+        var currentUserId = userContext.UserId;
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return false;
+        }
+
+        return repository.OwnerUserId == currentUserId ||
+               userContext.User?.IsInRole("Admin") == true;
     }
 
     [HttpGet("/{owner}/{repo}/graphify")]

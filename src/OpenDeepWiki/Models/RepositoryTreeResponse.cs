@@ -43,6 +43,11 @@ public class RepositoryTreeResponse
     public bool Exists { get; set; } = true;
 
     /// <summary>
+    /// 当前请求用户是否可以控制该仓库的处理（仓库所有者或管理员）
+    /// </summary>
+    public bool CanControl { get; set; }
+
+    /// <summary>
     /// 当前分支
     /// </summary>
     public string CurrentBranch { get; set; } = string.Empty;

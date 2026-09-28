@@ -28,6 +28,8 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  Pause,
+  Square,
   ExternalLink,
   RefreshCw,
   GitBranch,
@@ -73,6 +75,16 @@ const STATUS_CONFIG: Record<RepositoryStatus, {
     icon: XCircle,
     className: "text-red-500 bg-red-500/10",
     labelKey: "failed",
+  },
+  Paused: {
+    icon: Pause,
+    className: "text-amber-500 bg-amber-500/10",
+    labelKey: "paused",
+  },
+  Stopped: {
+    icon: Square,
+    className: "text-gray-500 bg-gray-500/10",
+    labelKey: "stopped",
   },
 };
 

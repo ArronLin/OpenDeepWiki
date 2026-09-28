@@ -21,7 +21,8 @@ public class RepositoryService(
     IOrganizationService organizationService,
     IRepositoryFullRegenerationCleaner fullRegenerationCleaner,
     IRepositoryGenerationLockService generationLockService,
-    IOptions<RepositoryAnalyzerOptions> repositoryOptions)
+    IOptions<RepositoryAnalyzerOptions> repositoryOptions,
+    IRepositoryProcessingControlService processingControlService)
 {
     [HttpPost("/submit")]
     public async Task<Repository> SubmitAsync([FromBody] RepositorySubmitRequest request)
@@ -529,6 +530,104 @@ public class RepositoryService(
                 CancellationToken.None);
             throw;
         }
+    }
+
+    /// <summary>
+    /// 暂停仓库处理，已生成的目录与文档内容保留，可断点继续
+    /// </summary>
+    [HttpPost("/pause")]
+    public Task<IResult> PauseAsync([FromBody] RegenerateRequest request)
+    {
+        return ExecuteProcessingControlAsync(
+            request,
+            (repositoryId, cancellationToken) => processingControlService.PauseAsync(context, repositoryId, cancellationToken));
+    }
+
+    /// <summary>
+    /// 继续已暂停的仓库处理，从断点恢复
+    /// </summary>
+    [HttpPost("/resume")]
+    public Task<IResult> ResumeAsync([FromBody] RegenerateRequest request)
+    {
+        return ExecuteProcessingControlAsync(
+            request,
+            (repositoryId, cancellationToken) => processingControlService.ResumeAsync(context, repositoryId, cancellationToken));
+    }
+
+    /// <summary>
+    /// 停止仓库处理，已生成的内容保留
+    /// </summary>
+    [HttpPost("/stop")]
+    public Task<IResult> StopAsync([FromBody] RegenerateRequest request)
+    {
+        return ExecuteProcessingControlAsync(
+            request,
+            (repositoryId, cancellationToken) => processingControlService.StopAsync(context, repositoryId, cancellationToken));
+    }
+
+    /// <summary>
+    /// 重新开始仓库处理：清空已生成内容并重新排队全量生成
+    /// </summary>
+    [HttpPost("/restart")]
+    public Task<IResult> RestartAsync([FromBody] RegenerateRequest request)
+    {
+        return ExecuteProcessingControlAsync(
+            request,
+            (repositoryId, cancellationToken) => processingControlService.RestartAsync(context, repositoryId, cancellationToken));
+    }
+
+    private async Task<IResult> ExecuteProcessingControlAsync(
+        RegenerateRequest request,
+        Func<string, CancellationToken, Task<RepositoryProcessingControlResult>> operation)
+    {
+        RegenerateResponse Error(string message)
+        {
+            return new RegenerateResponse
+            {
+                Success = false,
+                ErrorMessage = message
+            };
+        }
+
+        var currentUserId = userContext.UserId;
+        if (string.IsNullOrWhiteSpace(currentUserId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var repository = await context.Repositories
+            .AsNoTracking()
+            .FirstOrDefaultAsync(item =>
+                item.OrgName == request.Owner &&
+                item.RepoName == request.Repo &&
+                !item.IsDeleted);
+
+        if (repository is null)
+        {
+            return Results.NotFound(Error("仓库不存在"));
+        }
+
+        var isAdmin = userContext.User?.IsInRole("Admin") == true;
+        if (repository.OwnerUserId != currentUserId && !isAdmin)
+        {
+            return Results.Forbid();
+        }
+
+        var result = await operation(repository.Id, CancellationToken.None);
+        if (result.Succeeded)
+        {
+            return Results.Ok(new RegenerateResponse
+            {
+                Success = true
+            });
+        }
+
+        if (result.Outcome == RepositoryProcessingControlOutcome.NotFound)
+        {
+            return Results.NotFound(Error(result.Message ?? "仓库不存在"));
+        }
+
+        return Results.Conflict(Error(result.Message ?? "操作未生效，请刷新后重试"));
     }
 
     /// <summary>

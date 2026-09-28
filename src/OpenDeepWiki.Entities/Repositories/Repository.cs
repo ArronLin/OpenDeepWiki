@@ -11,7 +11,9 @@ public enum RepositoryStatus
     Pending = 0,
     Processing = 1,
     Completed = 2,
-    Failed = 3
+    Failed = 3,
+    Paused = 4,
+    Stopped = 5
 }
 
 /// <summary>

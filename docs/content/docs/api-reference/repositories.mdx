@@ -134,6 +134,8 @@ GET /api/v1/repositories/list?page=1&pageSize=10&isPublic=true&keyword=opendeep
 | 1 | Processing | 正在生成文档 |
 | 2 | Completed | 文档生成完成 |
 | 3 | Failed | 文档生成失败 |
+| 4 | Paused | 已暂停，可通过「继续」从断点恢复 |
+| 5 | Stopped | 已停止，可通过「重新开始」重新处理 |
 
 ---
 
@@ -227,6 +229,63 @@ POST /api/v1/repositories/regenerate
 
 <Callout type="warn">
 重新生成会清除所有现有文档（目录、文档文件、处理日志）并将仓库状态重置为 `Pending`。后台工作者将自动选择它进行重新处理。
+</Callout>
+
+---
+
+## 控制仓库处理
+
+对仓库级文档生成处理进行控制。暂停后可断点继续（已生成的文档不会被重新生成）；停止会保留已生成内容；重新开始会清空内容并全量重跑。
+
+| 操作 | 端点 | 允许的源状态 | 结果状态 |
+|---|---|---|---|
+| 暂停 | `POST /api/v1/repositories/pause` | Pending、Processing | Paused |
+| 继续 | `POST /api/v1/repositories/resume` | Paused | Pending |
+| 停止 | `POST /api/v1/repositories/stop` | Pending、Processing、Paused | Stopped |
+| 重新开始 | `POST /api/v1/repositories/restart` | 任意状态 | Pending（先清空内容） |
+
+操作权限与「重新生成」一致：仅仓库所有者或系统管理员可以执行。
+
+### 请求体
+
+四个端点使用相同的请求体：
+
+| 字段 | 类型 | 必需 | 描述 |
+|---|---|---|---|
+| `owner` | string | 是 | 仓库所有者/组织名称（最多 100 字符） |
+| `repo` | string | 是 | 仓库名称（最多 100 字符） |
+
+### 示例请求
+
+```json
+{
+  "owner": "AIDotNet",
+  "repo": "OpenDeepWiki"
+}
+```
+
+### 响应
+
+```json
+{
+  "success": true,
+  "errorMessage": null
+}
+```
+
+### 错误响应
+
+| 状态 | 条件 | 描述 |
+|---|---|---|
+| 401 | 用户未认证 | 返回 `401 Unauthorized` |
+| 403 | 非仓库所有者且非管理员 | 返回 `403 Forbidden` |
+| 404 | 仓库未找到 | `errorMessage` 为 "仓库不存在" |
+| 409 | 当前状态不允许该操作 | `errorMessage` 说明当前状态，如 "当前状态为 Completed，无法执行暂停操作" |
+| 409 | 状态被并发修改（如处理恰好完成） | 操作未生效，`errorMessage` 提示刷新后重试 |
+
+<Callout type="warn">
+- 暂停或停止生效后，仓库占用的集群生成槽位与生成锁会被释放，其他排队仓库可以在后续调度中获得槽位。
+- 对 Processing 状态的仓库执行「重新开始」会先终止当前执行并等待槽位释放（最多约 10 秒），随后清空内容并重新排队；若等待超时，会提示稍后重试，此时仓库已处于 Stopped，重新提交「重新开始」即可。
 </Callout>
 
 ---

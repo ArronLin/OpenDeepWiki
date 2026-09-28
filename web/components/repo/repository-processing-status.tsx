@@ -14,12 +14,24 @@ import {
   Languages,
   Loader2,
   Network,
+  Pause,
+  Play,
   RefreshCw,
   Sparkles,
+  Square,
   XCircle,
 } from "lucide-react";
+import { toast } from "sonner";
 import { useTranslations } from "@/hooks/use-translations";
-import { fetchRepoStatus, fetchProcessingLogs, regenerateRepository } from "@/lib/repository-api";
+import {
+  fetchRepoStatus,
+  fetchProcessingLogs,
+  pauseRepository,
+  restartRepository,
+  resumeRepository,
+  stopRepository,
+} from "@/lib/repository-api";
+import { ApiError } from "@/lib/api-client";
 import { buildRepoDocPath } from "@/lib/repo-route";
 import type { ProcessingStep, RepositoryStatus } from "@/types/repository";
 
@@ -27,7 +39,43 @@ interface RepositoryProcessingStatusProps {
   owner: string;
   repo: string;
   status: RepositoryStatus;
+  canControl?: boolean;
 }
+
+type ControlAction = "pause" | "resume" | "stop" | "restart";
+
+const controlActionMatrix: Record<RepositoryStatus, ControlAction[]> = {
+  Pending: ["pause", "stop", "restart"],
+  Processing: ["pause", "stop", "restart"],
+  Paused: ["resume", "stop", "restart"],
+  Stopped: ["restart"],
+  Failed: ["restart"],
+  Completed: ["restart"],
+};
+
+const controlActionIcons: Record<ControlAction, typeof Loader2> = {
+  pause: Pause,
+  resume: Play,
+  stop: Square,
+  restart: RefreshCw,
+};
+
+const controlActionFallbacks: Record<ControlAction, string> = {
+  pause: "Pause",
+  resume: "Resume",
+  stop: "Stop",
+  restart: "Restart",
+};
+
+const controlActionHandlers: Record<
+  ControlAction,
+  (owner: string, repo: string) => Promise<{ success: boolean; errorMessage?: string }>
+> = {
+  pause: pauseRepository,
+  resume: resumeRepository,
+  stop: stopRepository,
+  restart: restartRepository,
+};
 
 const statusConfig: Record<
   RepositoryStatus,
@@ -72,6 +120,22 @@ const statusConfig: Record<
     barClass: "bg-rose-400",
     fallback: "Failed",
   },
+  Paused: {
+    icon: Pause,
+    textClass: "text-amber-400",
+    softClass: "bg-amber-500/10",
+    borderClass: "border-amber-500/30",
+    barClass: "bg-amber-400",
+    fallback: "Paused",
+  },
+  Stopped: {
+    icon: Square,
+    textClass: "text-muted-foreground",
+    softClass: "bg-muted/40",
+    borderClass: "border-border",
+    barClass: "bg-muted-foreground",
+    fallback: "Stopped",
+  },
 };
 
 const processingSteps: Array<{
@@ -93,6 +157,7 @@ export function RepositoryProcessingStatus({
   owner,
   repo,
   status: initialStatus,
+  canControl = false,
 }: RepositoryProcessingStatusProps) {
   const t = useTranslations();
   const [status, setStatus] = useState<RepositoryStatus>(initialStatus);
@@ -102,9 +167,11 @@ export function RepositoryProcessingStatus({
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [dots, setDots] = useState("");
   const [elapsedTime, setElapsedTime] = useState(0);
-  const [isPolling, setIsPolling] = useState(true);
+  const [isPolling, setIsPolling] = useState(
+    initialStatus !== "Paused" && initialStatus !== "Stopped",
+  );
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
-  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [activeAction, setActiveAction] = useState<ControlAction | null>(null);
 
   const text = useCallback(
     (key: string, fallback: string) => {
@@ -144,6 +211,10 @@ export function RepositoryProcessingStatus({
       }
 
       if (statusResponse.statusName === "Failed") {
+        setIsPolling(false);
+      }
+
+      if (statusResponse.statusName === "Paused" || statusResponse.statusName === "Stopped") {
         setIsPolling(false);
       }
     } catch (error) {
@@ -212,25 +283,61 @@ export function RepositoryProcessingStatus({
     }
   }, [status, startedAt]);
 
-  const handleRetry = async () => {
-    setIsRegenerating(true);
+  const getControlErrorMessage = (error: unknown) => {
+    if (error instanceof ApiError) {
+      if (error.status === 403) {
+        return text(
+          "home.repository.status.actions.forbidden",
+          "You do not have permission to control this repository",
+        );
+      }
+
+      const data = error.data as { errorMessage?: string } | undefined;
+      if (data && typeof data.errorMessage === "string" && data.errorMessage.trim()) {
+        return data.errorMessage;
+      }
+
+      return (
+        error.message ||
+        text("home.repository.status.actions.actionFailed", "Action failed, please try again")
+      );
+    }
+
+    return text("home.repository.status.actions.actionFailed", "Action failed, please try again");
+  };
+
+  const handleControlAction = async (action: ControlAction) => {
+    setActiveAction(action);
     try {
-      const result = await regenerateRepository(owner, repo);
-      if (result.success) {
+      await controlActionHandlers[action](owner, repo);
+      toast.success(
+        text(
+          `home.repository.status.actions.${action}Success`,
+          `${controlActionFallbacks[action]} succeeded`,
+        ),
+      );
+
+      if (action === "resume" || action === "restart") {
         setStatus("Pending");
         setCurrentStep("Workspace");
-        setTotalDocuments(0);
-        setCompletedDocuments(0);
-        setStartedAt(null);
-        setElapsedTime(0);
+        if (action === "restart") {
+          setTotalDocuments(0);
+          setCompletedDocuments(0);
+          setStartedAt(null);
+          setElapsedTime(0);
+        }
         setIsPolling(true);
       } else {
-        console.error("Regenerate failed:", result.errorMessage);
+        setStatus(action === "pause" ? "Paused" : "Stopped");
+        setIsPolling(false);
       }
+
+      await pollStatusAndLogs();
     } catch (error) {
-      console.error("Failed to regenerate:", error);
+      toast.error(getControlErrorMessage(error));
+      await pollStatusAndLogs();
     } finally {
-      setIsRegenerating(false);
+      setActiveAction(null);
     }
   };
 
@@ -264,6 +371,7 @@ export function RepositoryProcessingStatus({
   );
   const statusLabel = text(`home.repository.status.${status.toLowerCase()}`, config.fallback);
   const isProcessing = status === "Processing" || status === "Pending";
+  const availableActions = canControl ? controlActionMatrix[status] : [];
 
   const formatTime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -441,22 +549,58 @@ export function RepositoryProcessingStatus({
               )}
             </div>
 
-            {status === "Failed" && (
-              <button
-                type="button"
-                onClick={handleRetry}
-                disabled={isRegenerating}
-                className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isRegenerating ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
+            {status === "Paused" && (
+              <div className="mt-6 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
+                <Pause className="h-4 w-4" />
+                {text(
+                  "home.repository.status.pausedTip",
+                  "Generation is paused. Resume to continue from the last completed document.",
                 )}
-                {isRegenerating
-                  ? text("home.repository.status.regenerating", "Regenerating...")
-                  : text("home.repository.status.retry", "Retry")}
-              </button>
+              </div>
+            )}
+
+            {status === "Stopped" && (
+              <div className="mt-6 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                <Square className="h-4 w-4" />
+                {text(
+                  "home.repository.status.stoppedTip",
+                  "Generation is stopped. Generated documents are kept until you restart.",
+                )}
+              </div>
+            )}
+
+            {canControl && availableActions.length > 0 && (
+              <div className="mt-6 flex flex-wrap gap-3">
+                {availableActions.map((action) => {
+                  const ActionIcon = controlActionIcons[action];
+                  const isActionLoading = activeAction === action;
+                  const isPrimaryAction = action === "restart";
+
+                  return (
+                    <button
+                      key={action}
+                      type="button"
+                      onClick={() => handleControlAction(action)}
+                      disabled={activeAction !== null}
+                      className={`inline-flex h-10 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                        isPrimaryAction
+                          ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                          : "border border-border bg-background text-foreground hover:border-foreground/30"
+                      }`}
+                    >
+                      {isActionLoading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <ActionIcon className="h-4 w-4" />
+                      )}
+                      {text(
+                        `home.repository.status.actions.${action}`,
+                        controlActionFallbacks[action],
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             )}
 
             {status === "Completed" && (

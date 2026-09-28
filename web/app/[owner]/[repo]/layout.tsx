@@ -49,7 +49,13 @@ async function getGitHubInfo(owner: string, repo: string) {
 async function getProcessingStatus(owner: string, repo: string) {
   try {
     const logs = await fetchProcessingLogs(owner, repo, undefined, 1);
-    if (logs.statusName === "Pending" || logs.statusName === "Processing" || logs.statusName === "Failed") {
+    if (
+      logs.statusName === "Pending" ||
+      logs.statusName === "Processing" ||
+      logs.statusName === "Paused" ||
+      logs.statusName === "Stopped" ||
+      logs.statusName === "Failed"
+    ) {
       return logs.statusName;
     }
   } catch {
@@ -104,13 +110,20 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
       content = <RepositoryNotFound owner={decodedOwner} repo={decodedRepo} gitHubInfo={gitHubInfo} />;
     }
   }
-  // 仓库正在处理中或等待处理
-  else if (tree.statusName === "Pending" || tree.statusName === "Processing" || tree.statusName === "Failed") {
+  // 仓库正在处理中、暂停、停止或等待处理
+  else if (
+    tree.statusName === "Pending" ||
+    tree.statusName === "Processing" ||
+    tree.statusName === "Paused" ||
+    tree.statusName === "Stopped" ||
+    tree.statusName === "Failed"
+  ) {
     content = (
       <RepositoryProcessingStatus
         owner={decodedOwner}
         repo={decodedRepo}
         status={tree.statusName}
+        canControl={tree.canControl ?? false}
       />
     );
   }
@@ -121,6 +134,7 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
         owner={decodedOwner}
         repo={decodedRepo}
         status="Completed"
+        canControl={tree.canControl ?? false}
       />
     );
   }

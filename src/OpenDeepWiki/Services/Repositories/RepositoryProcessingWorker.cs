@@ -23,6 +23,11 @@ public class RepositoryProcessingWorker(
     private static readonly TimeSpan PollingInterval = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, Task> _inFlight = new();
 
+    /// <summary>
+    /// Cadence used by the per-job control monitor while polling the repository status.
+    /// </summary>
+    internal TimeSpan ControlPollInterval { get; set; } = RepositoryProcessingControlMonitor.DefaultPollInterval;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation(
@@ -143,7 +148,7 @@ public class RepositoryProcessingWorker(
         }
     }
 
-    private async Task ProcessRepositoryJobAsync(
+    internal async Task ProcessRepositoryJobAsync(
         string repositoryId,
         WikiGenerationWorkLease lease,
         CancellationToken stoppingToken)
@@ -167,6 +172,9 @@ public class RepositoryProcessingWorker(
             return;
         }
 
+        using var jobControlCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var jobToken = jobControlCts.Token;
+
         await using var heartbeat = WikiGenerationHeartbeat.Start(
             scopeFactory,
             lease,
@@ -186,10 +194,20 @@ public class RepositoryProcessingWorker(
                 generator.SetCurrentRepository(repository.Id, $"{repository.OrgName}/{repository.RepoName}");
             }
 
-            repository.Status = RepositoryStatus.Processing;
-            repository.UpdateTimestamp();
-            context.Repositories.Update(repository);
-            await context.SaveChangesAsync(stoppingToken);
+            var started = await RepositoryStatusTransition.TryTransitionAsync(
+                context,
+                repository.Id,
+                [RepositoryStatus.Pending, RepositoryStatus.Processing],
+                RepositoryStatus.Processing,
+                CancellationToken.None);
+
+            if (started == 0)
+            {
+                logger.LogInformation(
+                    "Repository processing abandoned because its status changed before start. RepositoryId: {RepositoryId}",
+                    repository.Id);
+                return;
+            }
 
             if (processingLogService != null)
             {
@@ -202,58 +220,93 @@ public class RepositoryProcessingWorker(
                 "Starting repository processing. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, GitUrl: {GitUrl}, Slot: {SlotIndex}",
                 repository.Id, repository.OrgName, repository.RepoName, repository.GitUrl, lease.SlotIndex);
 
+            var monitor = new RepositoryProcessingControlMonitor(
+                cancellationToken => ReadRepositoryStatusAsync(repository.Id, cancellationToken),
+                ControlPollInterval,
+                logger);
+            var monitorTask = monitor.RunAsync(jobControlCts.Cancel, jobToken);
+
             try
             {
-                await ProcessRepositoryAsync(
-                    repository,
-                    context,
-                    repositoryAnalyzer,
-                    wikiGenerator,
-                    branchProcessor,
-                    skillMarkdownBuilder,
-                    scanPlanResolver,
-                    processingLogService,
-                    stoppingToken);
-
-                stopwatch.Stop();
-                repository.Status = RepositoryStatus.Completed;
-                logger.LogInformation(
-                    "Repository processing completed successfully. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms",
-                    repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds);
-
-                if (processingLogService != null)
+                try
                 {
-                    await processingLogService.LogAsync(repository.Id, ProcessingStep.Complete,
-                        $"Repository processing complete, total time: {stopwatch.ElapsedMilliseconds}ms", cancellationToken: stoppingToken);
+                    await ProcessRepositoryAsync(
+                        repository,
+                        context,
+                        repositoryAnalyzer,
+                        wikiGenerator,
+                        branchProcessor,
+                        skillMarkdownBuilder,
+                        scanPlanResolver,
+                        processingLogService,
+                        jobToken);
+
+                    stopwatch.Stop();
+                    await RepositoryStatusTransition.TryTransitionAsync(
+                        context,
+                        repository.Id,
+                        [RepositoryStatus.Processing],
+                        RepositoryStatus.Completed,
+                        CancellationToken.None);
+
+                    logger.LogInformation(
+                        "Repository processing completed successfully. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms",
+                        repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds);
+
+                    if (processingLogService != null)
+                    {
+                        await processingLogService.LogAsync(repository.Id, ProcessingStep.Complete,
+                            $"Repository processing complete, total time: {stopwatch.ElapsedMilliseconds}ms", cancellationToken: stoppingToken);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    stopwatch.Stop();
+                    await RepositoryStatusTransition.TryTransitionAsync(
+                        context,
+                        repository.Id,
+                        [RepositoryStatus.Processing],
+                        RepositoryStatus.Pending,
+                        CancellationToken.None);
+
+                    logger.LogWarning(
+                        "Repository processing cancelled. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms",
+                        repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds);
+                    throw;
+                }
+                catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
+                {
+                    stopwatch.Stop();
+                    logger.LogInformation(
+                        "Repository processing stopped by user control. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms",
+                        repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds);
+                }
+                catch (Exception ex)
+                {
+                    stopwatch.Stop();
+                    await RepositoryStatusTransition.TryTransitionAsync(
+                        context,
+                        repository.Id,
+                        [RepositoryStatus.Processing],
+                        RepositoryStatus.Failed,
+                        CancellationToken.None);
+
+                    logger.LogError(ex,
+                        "Repository processing failed. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms, ErrorType: {ErrorType}",
+                        repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds, ex.GetType().Name);
+
+                    if (processingLogService != null)
+                    {
+                        await processingLogService.LogAsync(repository.Id, ProcessingStep.Content,
+                            $"Processing failed: {ex.Message}", cancellationToken: stoppingToken);
+                    }
                 }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            finally
             {
-                stopwatch.Stop();
-                repository.Status = RepositoryStatus.Pending;
-                logger.LogWarning(
-                    "Repository processing cancelled. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms",
-                    repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds);
-                throw;
+                jobControlCts.Cancel();
+                await WaitForMonitorAsync(monitorTask);
             }
-            catch (Exception ex)
-            {
-                stopwatch.Stop();
-                repository.Status = RepositoryStatus.Failed;
-                logger.LogError(ex,
-                    "Repository processing failed. RepositoryId: {RepositoryId}, Repository: {Org}/{Repo}, Duration: {Duration}ms, ErrorType: {ErrorType}",
-                    repository.Id, repository.OrgName, repository.RepoName, stopwatch.ElapsedMilliseconds, ex.GetType().Name);
-
-                if (processingLogService != null)
-                {
-                    await processingLogService.LogAsync(repository.Id, ProcessingStep.Content,
-                        $"Processing failed: {ex.Message}", cancellationToken: stoppingToken);
-                }
-            }
-
-            repository.UpdateTimestamp();
-            context.Repositories.Update(repository);
-            await context.SaveChangesAsync(stoppingToken);
         }
         finally
         {
@@ -273,6 +326,34 @@ public class RepositoryProcessingWorker(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to release wiki generation lease. RepositoryId: {RepositoryId}", lease.RepositoryId);
+        }
+    }
+
+    private async Task<RepositoryStatus?> ReadRepositoryStatusAsync(string repositoryId, CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetService<IContext>();
+        if (context is null)
+        {
+            return null;
+        }
+
+        return await context.Repositories
+            .AsNoTracking()
+            .Where(item => item.Id == repositoryId && !item.IsDeleted)
+            .Select(item => (RepositoryStatus?)item.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private async Task WaitForMonitorAsync(Task monitorTask)
+    {
+        try
+        {
+            await monitorTask;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Repository processing control monitor ended with an error");
         }
     }
 

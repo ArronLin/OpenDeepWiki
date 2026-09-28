@@ -14,6 +14,7 @@ export interface RepoTreeResponse {
   status: number;
   statusName: RepositoryStatus;
   exists: boolean;
+  canControl?: boolean;
   currentBranch: string;
   currentLanguage: string;
   hasGraphifyArtifact?: boolean;
@@ -70,7 +71,7 @@ export interface RepoHeading {
 }
 
 // Repository submission and list types
-export type RepositoryStatus = "Pending" | "Processing" | "Completed" | "Failed";
+export type RepositoryStatus = "Pending" | "Processing" | "Completed" | "Failed" | "Paused" | "Stopped";
 
 export interface RepositorySubmitRequest {
   gitUrl: string;

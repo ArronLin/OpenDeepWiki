@@ -291,7 +291,17 @@ public class RepositoryDocsServiceGraphifyTests
             gitPlatform,
             cache ?? new Mock<ICache>(MockBehavior.Strict).Object,
             graphifyArtifactService ?? new Mock<IGraphifyArtifactService>(MockBehavior.Strict).Object,
-            new RepositorySkillMarkdownBuilder());
+            new RepositorySkillMarkdownBuilder(),
+            new AnonymousUserContext());
+    }
+
+    private sealed class AnonymousUserContext : OpenDeepWiki.Services.Auth.IUserContext
+    {
+        public string? UserId => null;
+        public string? UserName => null;
+        public string? Email => null;
+        public bool IsAuthenticated => false;
+        public System.Security.Claims.ClaimsPrincipal? User => null;
     }
 
     private static TestDbContext CreateContext()

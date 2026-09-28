@@ -170,6 +170,7 @@ try
         });
     builder.Services.AddScoped<IRepositoryAnalyzer, RepositoryAnalyzer>();
     builder.Services.AddScoped<IRepositoryFullRegenerationCleaner, RepositoryFullRegenerationCleaner>();
+    builder.Services.AddScoped<IRepositoryProcessingControlService, RepositoryProcessingControlService>();
     builder.Services.AddScoped<IBranchFullGenerationCleaner, BranchFullGenerationCleaner>();
     builder.Services.AddSingleton<WikiGenerationInstanceIdentity>();
     builder.Services.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();

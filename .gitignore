@@ -506,3 +506,7 @@ src/OpenDeepWiki/Properties/launchSettings.json
 
 # Local MCP client configuration (machine-specific endpoints)
 .mcp.json
+
+# 离线部署产物与依赖预置目录（体积大，仅本地保留）
+nuget-packages/
+offline-bundle/

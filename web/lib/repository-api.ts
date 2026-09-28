@@ -345,6 +345,55 @@ export async function regenerateRepository(
   );
 }
 
+type RepositoryControlResponse = { success: boolean; errorMessage?: string };
+
+/**
+ * Pause repository processing. Generated content is kept and processing
+ * resumes from the checkpoint when continued.
+ * 暂停仓库处理（可断点继续）
+ */
+export async function pauseRepository(
+  owner: string,
+  repo: string
+): Promise<RepositoryControlResponse> {
+  return api.post<RepositoryControlResponse>("/api/v1/repositories/pause", { owner, repo });
+}
+
+/**
+ * Resume a paused repository. Documents already persisted are not regenerated.
+ * 继续已暂停的仓库处理
+ */
+export async function resumeRepository(
+  owner: string,
+  repo: string
+): Promise<RepositoryControlResponse> {
+  return api.post<RepositoryControlResponse>("/api/v1/repositories/resume", { owner, repo });
+}
+
+/**
+ * Stop repository processing. Generated content is kept; use restart to
+ * process the repository again.
+ * 停止仓库处理（保留已生成内容）
+ */
+export async function stopRepository(
+  owner: string,
+  repo: string
+): Promise<RepositoryControlResponse> {
+  return api.post<RepositoryControlResponse>("/api/v1/repositories/stop", { owner, repo });
+}
+
+/**
+ * Restart repository processing: clears generated content and requeues the
+ * repository for a full regeneration. A running job is stopped first.
+ * 重新开始仓库处理（清空内容并重新排队）
+ */
+export async function restartRepository(
+  owner: string,
+  repo: string
+): Promise<RepositoryControlResponse> {
+  return api.post<RepositoryControlResponse>("/api/v1/repositories/restart", { owner, repo });
+}
+
 /**
  * Fetch repository mind map
  * 获取仓库项目架构思维导图

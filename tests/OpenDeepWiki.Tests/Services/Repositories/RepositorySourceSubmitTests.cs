@@ -980,7 +980,8 @@ public class RepositorySourceSubmitTests
             Mock.Of<IOrganizationService>(),
             new RepositoryFullRegenerationCleaner(),
             new RepositoryGenerationLockService(context),
-            Options.Create(analyzerOptions));
+            Options.Create(analyzerOptions),
+            new RepositoryProcessingControlService(new RepositoryFullRegenerationCleaner()));
     }
 
     private static async Task<RegenerateResponse> RegenerateAsync(
