@@ -30,6 +30,9 @@ import {
   Zap,
   History,
   AlertTriangle,
+  Pause,
+  Play,
+  Square,
   Sparkles,
   Pencil,
   Save,
@@ -51,7 +54,6 @@ import {
   getRepository,
   getRepositoryGraphifyArtifacts,
   getRepositoryManagement,
-  regenerateRepository,
   regenerateRepositoryDocument,
   retryBranchGenerationTask,
   retryIncrementalUpdateTask,
@@ -65,8 +67,16 @@ import {
   UpdateRepositoryScanPlanPayload,
 } from "@/lib/admin-api";
 import { getRepositorySourceTypeLabelKey, isGitRepositorySource } from "@/lib/repository-source";
-import { fetchProcessingLogs, fetchRepoDoc, fetchRepoTree } from "@/lib/repository-api";
-import type { ProcessingLogResponse, RepoDocResponse, RepoTreeNode } from "@/types/repository";
+import {
+  fetchProcessingLogs,
+  fetchRepoDoc,
+  fetchRepoTree,
+  pauseRepository,
+  resumeRepository,
+  restartRepository,
+  stopRepository,
+} from "@/lib/repository-api";
+import type { ProcessingLogResponse, RepoDocResponse, RepositoryStatus, RepoTreeNode } from "@/types/repository";
 import { AdminBreadcrumb } from "@/components/admin/admin-breadcrumb";
 import { StatusBadge, type StatusTone } from "@/components/admin/status-badge";
 import {
@@ -75,12 +85,15 @@ import {
   findNodeTrail,
   mapTaskStatusToAdminTask,
   normalizeTaskStatus,
+  repositoryStatusFromNumber,
 } from "./_components/utils";
 
 const TASK_STATUS_TONE: Record<string, StatusTone> = {
   completed: "success",
   processing: "info",
   pending: "neutral",
+  paused: "warning",
+  stopped: "neutral",
   failed: "danger",
   cancelled: "warning",
   other: "neutral",
@@ -89,6 +102,34 @@ const TASK_STATUS_TONE: Record<string, StatusTone> = {
 function taskStatusTone(status: string): StatusTone {
   return TASK_STATUS_TONE[normalizeTaskStatus(status)] ?? "neutral";
 }
+
+type ControlAction = "pause" | "resume" | "stop" | "restart";
+
+const controlActionMatrix: Record<RepositoryStatus, ControlAction[]> = {
+  Pending: ["pause", "stop", "restart"],
+  Processing: ["pause", "stop", "restart"],
+  Paused: ["resume", "stop", "restart"],
+  Stopped: ["restart"],
+  Failed: ["restart"],
+  Completed: ["restart"],
+};
+
+const controlActionIcons: Record<ControlAction, typeof Loader2> = {
+  pause: Pause,
+  resume: Play,
+  stop: Square,
+  restart: RefreshCw,
+};
+
+const controlActionHandlers: Record<
+  ControlAction,
+  (owner: string, repo: string) => Promise<{ success: boolean; errorMessage?: string }>
+> = {
+  pause: pauseRepository,
+  resume: resumeRepository,
+  stop: stopRepository,
+  restart: restartRepository,
+};
 
 function mapBranchGenerationTask(source: AdminBranchGenerationTask): AdminBranchGenerationTask {
   return {
@@ -142,11 +183,11 @@ export default function AdminRepositoryManagementPage() {
   const [docLoading, setDocLoading] = useState(false);
   const [logsLoading, setLogsLoading] = useState(false);
   const [syncingStats, setSyncingStats] = useState(false);
-  const [regeneratingRepo, setRegeneratingRepo] = useState(false);
   const [regeneratingDoc, setRegeneratingDoc] = useState(false);
   const [generatingGraphify, setGeneratingGraphify] = useState(false);
   const [triggeringIncremental, setTriggeringIncremental] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [activeControlAction, setActiveControlAction] = useState<ControlAction | null>(null);
   const [taskRefreshingId, setTaskRefreshingId] = useState<string | null>(null);
   const [taskRetryingId, setTaskRetryingId] = useState<string | null>(null);
   const [branchTaskActionId, setBranchTaskActionId] = useState<string | null>(null);
@@ -154,6 +195,7 @@ export default function AdminRepositoryManagementPage() {
   const [logBranchFilter, setLogBranchFilter] = useState("all");
   const [logTaskFilter, setLogTaskFilter] = useState("");
   const [activeTab, setActiveTab] = useState("docs");
+  const [docRefreshNonce, setDocRefreshNonce] = useState(0);
   const graphifyRequestInFlightRef = useRef(false);
 
   const selectedBranch = useMemo(() => {
@@ -177,6 +219,11 @@ export default function AdminRepositoryManagementPage() {
       ?? branchGenerationTasks.find((task) => task.branchId === selectedBranch.id)
       ?? null;
   }, [branchGenerationTasks, selectedBranch]);
+
+  const repositoryStatusKey = useMemo(
+    () => (repository ? repositoryStatusFromNumber(repository.status) : null),
+    [repository]
+  );
 
   const branchGenerationSummary = useMemo(() => {
     const summary = {
@@ -264,6 +311,10 @@ export default function AdminRepositoryManagementPage() {
           return t("admin.repositories.completed");
         case "failed":
           return t("admin.repositories.failed");
+        case "paused":
+          return t("admin.repositories.paused");
+        case "stopped":
+          return t("admin.repositories.stopped");
         case "cancelled":
           return t("admin.repositories.management.status.cancelled");
         default:
@@ -425,12 +476,14 @@ export default function AdminRepositoryManagementPage() {
     ];
   }, [incrementalSummary, t]);
 
-  const loadBaseData = useCallback(async () => {
+  const loadBaseData = useCallback(async (options?: { silent?: boolean }) => {
     if (!repositoryId) {
       return;
     }
 
-    setPageLoading(true);
+    if (!options?.silent) {
+      setPageLoading(true);
+    }
     try {
       const [repoData, managementData, graphifyData, scanPlanData] = await Promise.all([
         getRepository(repositoryId),
@@ -444,15 +497,21 @@ export default function AdminRepositoryManagementPage() {
       setScanPlan(scanPlanData);
     } catch (error) {
       console.error("Failed to load repository management data:", error);
-      toast.error(t("admin.repositories.management.toasts.loadManagementFailed"));
+      if (!options?.silent) {
+        toast.error(t("admin.repositories.management.toasts.loadManagementFailed"));
+      }
     } finally {
-      setPageLoading(false);
+      if (!options?.silent) {
+        setPageLoading(false);
+      }
     }
   }, [repositoryId, t]);
 
   const loadLogs = useCallback(async (options?: { silent?: boolean }) => {
     if (!repository) return;
-    setLogsLoading(true);
+    if (!options?.silent) {
+      setLogsLoading(true);
+    }
     try {
       const branchId = logBranchFilter === "all" ? undefined : logBranchFilter;
       const taskId = logTaskFilter.trim() || undefined;
@@ -464,7 +523,9 @@ export default function AdminRepositoryManagementPage() {
         toast.error(t("admin.repositories.management.toasts.loadLogsFailed"));
       }
     } finally {
-      setLogsLoading(false);
+      if (!options?.silent) {
+        setLogsLoading(false);
+      }
     }
   }, [logBranchFilter, logTaskFilter, repository, t]);
 
@@ -616,30 +677,58 @@ export default function AdminRepositoryManagementPage() {
     });
   }, [selectedBranch]);
 
-  useEffect(() => {
-    if (repository) {
-      loadLogs();
-    }
-  }, [repository, loadLogs]);
+  const logsFetchKey = `${repository?.id ?? ""}|${logBranchFilter}|${logTaskFilter}`;
+  const logsFetchKeyRef = useRef("");
 
   useEffect(() => {
+    if (!repository || logsFetchKey === logsFetchKeyRef.current) {
+      return;
+    }
+    logsFetchKeyRef.current = logsFetchKey;
+    loadLogs();
+  }, [logsFetchKey, repository, loadLogs]);
+
+  const treeFetchKey = `${repository?.id ?? ""}|${selectedBranch?.id ?? ""}|${selectedLanguage}`;
+  const treeFetchKeyRef = useRef("");
+
+  useEffect(() => {
+    if (treeFetchKey === treeFetchKeyRef.current) {
+      return;
+    }
+    treeFetchKeyRef.current = treeFetchKey;
     loadTree();
-  }, [loadTree]);
+  }, [treeFetchKey, loadTree]);
+
+  const docFetchKey = `${repository?.id ?? ""}|${selectedBranch?.id ?? ""}|${selectedLanguage}|${selectedDocSlug}|${docRefreshNonce}`;
+  const docFetchKeyRef = useRef("");
 
   useEffect(() => {
-    loadDoc();
-  }, [loadDoc]);
-
-  useEffect(() => {
-    if (scanPlan) {
-      setScanMode(scanPlan.mode);
-      setDirectoryTreeDepthInput(scanPlan.directoryTreeDepth?.toString() ?? "");
-      setFileListDepthInput(scanPlan.fileListDepth?.toString() ?? "");
-      setMaxTreeNodesInput(scanPlan.maxTreeNodes?.toString() ?? "");
-      setMaxFilesPerDirectoryInput(scanPlan.maxFilesPerDirectory?.toString() ?? "");
-      setMaxTotalFilesInput(scanPlan.maxTotalFiles?.toString() ?? "");
-      setExtraExcludedDirsInput((scanPlan.extraExcludedDirs ?? []).join(", "));
+    if (docFetchKey === docFetchKeyRef.current) {
+      return;
     }
+    docFetchKeyRef.current = docFetchKey;
+    loadDoc();
+  }, [docFetchKey, loadDoc]);
+
+  const appliedScanPlanRef = useRef("");
+
+  useEffect(() => {
+    if (!scanPlan) {
+      return;
+    }
+    // 轮询会周期刷新出内容相同的新对象，避免因此覆盖表单中未保存的输入
+    const fingerprint = JSON.stringify(scanPlan);
+    if (fingerprint === appliedScanPlanRef.current) {
+      return;
+    }
+    appliedScanPlanRef.current = fingerprint;
+    setScanMode(scanPlan.mode);
+    setDirectoryTreeDepthInput(scanPlan.directoryTreeDepth?.toString() ?? "");
+    setFileListDepthInput(scanPlan.fileListDepth?.toString() ?? "");
+    setMaxTreeNodesInput(scanPlan.maxTreeNodes?.toString() ?? "");
+    setMaxFilesPerDirectoryInput(scanPlan.maxFilesPerDirectory?.toString() ?? "");
+    setMaxTotalFilesInput(scanPlan.maxTotalFiles?.toString() ?? "");
+    setExtraExcludedDirsInput((scanPlan.extraExcludedDirs ?? []).join(", "));
   }, [scanPlan]);
 
   useEffect(() => {
@@ -669,7 +758,7 @@ export default function AdminRepositoryManagementPage() {
 
     const intervalId = window.setInterval(async () => {
       try {
-        await loadBaseData();
+        await loadBaseData({ silent: true });
         await loadLogs({ silent: true });
       } catch (error) {
         console.error("Failed to refresh branch generation tasks:", error);
@@ -680,6 +769,25 @@ export default function AdminRepositoryManagementPage() {
       window.clearInterval(intervalId);
     };
   }, [branchGenerationSummary.active, loadBaseData, loadLogs]);
+
+  useEffect(() => {
+    if (repositoryStatusKey !== "Pending" && repositoryStatusKey !== "Processing") {
+      return;
+    }
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        await loadBaseData({ silent: true });
+        await loadLogs({ silent: true });
+      } catch (error) {
+        console.error("Failed to refresh repository processing status:", error);
+      }
+    }, 10000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [repositoryStatusKey, loadBaseData, loadLogs]);
 
   useEffect(() => {
     if (!selectedDocSlug || docTreeNodes.length === 0) return;
@@ -735,6 +843,7 @@ export default function AdminRepositoryManagementPage() {
       await loadBaseData();
       await loadLogs();
       await loadTree();
+      setDocRefreshNonce((current) => current + 1);
     } finally {
       setRefreshingAll(false);
     }
@@ -768,29 +877,27 @@ export default function AdminRepositoryManagementPage() {
     }
   };
 
-  const handleRegenerateRepository = async () => {
-    if (!repositoryId) return;
-    if (isScanPlanDirty) {
-      toast.warning(t("admin.repositories.management.scanPlan.saveFirst"));
+  const handleRepositoryControl = async (action: ControlAction) => {
+    if (!repository) return;
+    if (action === "restart" && !window.confirm(t("admin.repositories.management.confirmRestart"))) {
       return;
     }
-    if (!window.confirm(t("admin.repositories.management.confirmRegenerateAll"))) return;
 
-    setRegeneratingRepo(true);
+    setActiveControlAction(action);
     try {
-      const result = await regenerateRepository(repositoryId);
+      const result = await controlActionHandlers[action](repository.orgName, repository.repoName);
       if (result.success) {
-        toast.success(result.message || t("admin.repositories.management.toasts.regenerateAllSuccess"));
-        await loadBaseData();
-        await loadLogs();
+        toast.success(t(`admin.repositories.management.toasts.${action}Success`));
       } else {
-        toast.error(result.message || t("admin.repositories.management.toasts.regenerateAllFailed"));
+        toast.error(result.errorMessage || t("admin.repositories.management.toasts.controlFailed"));
       }
     } catch (error) {
-      console.error("Failed to regenerate repository:", error);
-      toast.error(t("admin.repositories.management.toasts.regenerateAllFailed"));
+      console.error("Failed to control repository processing:", error);
+      toast.error(error instanceof Error ? error.message : t("admin.repositories.management.toasts.controlFailed"));
     } finally {
-      setRegeneratingRepo(false);
+      setActiveControlAction(null);
+      await loadBaseData();
+      await loadLogs();
     }
   };
 
@@ -994,6 +1101,7 @@ export default function AdminRepositoryManagementPage() {
       if (result.success) {
         toast.success(t("admin.repositories.management.toasts.triggerIncrementalSuccess", { taskId: result.taskId }));
         await loadBaseData();
+        await loadLogs();
       } else {
         toast.error(result.message || t("admin.repositories.management.toasts.triggerIncrementalFailed"));
       }
@@ -1197,6 +1305,9 @@ export default function AdminRepositoryManagementPage() {
     );
   }
 
+  const repositoryStatusSource = repositoryStatusKey ?? repository.statusText;
+  const availableControlActions = repositoryStatusKey ? controlActionMatrix[repositoryStatusKey] : [];
+
   return (
     <div className="space-y-5">
       <AdminBreadcrumb currentLabel={`${repository.orgName}/${repository.repoName}`} />
@@ -1221,9 +1332,9 @@ export default function AdminRepositoryManagementPage() {
                 {t(`admin.repositories.${getRepositorySourceTypeLabelKey(repository.sourceType, repository.sourceTypeName)}`)}
               </Badge>
               <StatusBadge
-                tone={taskStatusTone(repository.statusText)}
-                label={getLocalizedTaskStatus(repository.statusText)}
-                pulse={normalizeTaskStatus(repository.statusText) === "processing"}
+                tone={taskStatusTone(repositoryStatusSource)}
+                label={getLocalizedTaskStatus(repositoryStatusSource)}
+                pulse={normalizeTaskStatus(repositoryStatusSource) === "processing"}
               />
             </div>
             <p className="break-all pl-9 text-xs text-muted-foreground">
@@ -1251,10 +1362,26 @@ export default function AdminRepositoryManagementPage() {
               {isGraphifyGenerating ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
               {t("admin.repositories.management.generateGraphify")}
             </Button>
-            <Button variant="destructive" size="sm" onClick={handleRegenerateRepository} disabled={regeneratingRepo}>
-              {regeneratingRepo ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
-              {t("admin.repositories.management.regenerateAll")}
-            </Button>
+            {availableControlActions.map((action) => {
+              const ControlIcon = controlActionIcons[action];
+              const isControlLoading = activeControlAction === action;
+              return (
+                <Button
+                  key={action}
+                  variant={action === "restart" ? "destructive" : "outline"}
+                  size="sm"
+                  onClick={() => handleRepositoryControl(action)}
+                  disabled={activeControlAction !== null}
+                >
+                  {isControlLoading ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ControlIcon className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {t(`admin.repositories.management.${action}`)}
+                </Button>
+              );
+            })}
           </div>
         </div>
       </Card>
@@ -1265,9 +1392,9 @@ export default function AdminRepositoryManagementPage() {
             <div className="flex items-center justify-between">
               <p className="text-sm font-semibold">{t("admin.repositories.management.summaryTitle")}</p>
               <StatusBadge
-                tone={taskStatusTone(repository.statusText)}
-                label={getLocalizedTaskStatus(repository.statusText)}
-                pulse={normalizeTaskStatus(repository.statusText) === "processing"}
+                tone={taskStatusTone(repositoryStatusSource)}
+                label={getLocalizedTaskStatus(repositoryStatusSource)}
+                pulse={normalizeTaskStatus(repositoryStatusSource) === "processing"}
               />
             </div>
             <div className="rounded-lg border bg-muted/30 p-3">

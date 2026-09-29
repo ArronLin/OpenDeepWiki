@@ -1,4 +1,4 @@
-import type { RepoTreeNode } from "@/types/repository";
+import type { RepositoryStatus, RepoTreeNode } from "@/types/repository";
 import type { AdminIncrementalTask } from "@/lib/admin-api";
 import { getIncrementalUpdateTask } from "@/lib/admin-api";
 
@@ -73,7 +73,29 @@ export function normalizeTaskStatus(status: string) {
   if (value.includes("completed") || value.includes("完成")) return "completed";
   if (value.includes("processing") || value.includes("处理")) return "processing";
   if (value.includes("pending") || value.includes("待")) return "pending";
+  if (value.includes("paused") || value.includes("暂停")) return "paused";
+  if (value.includes("stopped") || value.includes("停止")) return "stopped";
   if (value.includes("failed") || value.includes("失败")) return "failed";
   if (value.includes("cancel") || value.includes("取消")) return "cancelled";
   return "other";
+}
+
+// 管理接口的 statusText 对 Paused/Stopped 会返回"未知"，仓库状态以数字枚举为准
+export function repositoryStatusFromNumber(status: number): RepositoryStatus | null {
+  switch (status) {
+    case 0:
+      return "Pending";
+    case 1:
+      return "Processing";
+    case 2:
+      return "Completed";
+    case 3:
+      return "Failed";
+    case 4:
+      return "Paused";
+    case 5:
+      return "Stopped";
+    default:
+      return null;
+  }
 }
