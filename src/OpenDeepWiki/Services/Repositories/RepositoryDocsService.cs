@@ -25,6 +25,7 @@ public class RepositoryDocsService(
 {
     private const string FallbackLanguageCode = "zh"; // 当没有默认语言标记时的回退语言
     private const int ExportRateLimitMinutes = 5; // 导出限流：5分钟内只能导出一次
+    private static readonly TimeSpan GitPlatformCacheTtl = TimeSpan.FromMinutes(10); // Git 平台公开信息缓存，避免爬虫流量打爆外部 API 配额
     private const int MaxConcurrentExports = 10; // 最大并发导出数
     private const string ExportRateLimitKeyPrefix = "export:rate-limit";
     private const string ExportConcurrencyCountKey = "export:concurrency:count";
@@ -39,12 +40,42 @@ public class RepositoryDocsService(
     {
         (owner, repo) = RepositoryRouteDecoder.DecodeOwnerAndRepo(owner, repo);
 
+        var version = await GetRepoCacheVersionAsync(owner, repo);
+        var cacheKey = RepositoryPublicReadCache.BuildEntryKey("repos:branches", version, owner, repo, null, null);
+
+        var cached = await cache.GetAsync<RepositoryBranchesResponse>(cacheKey);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var (response, isCacheable, isStableState) = await GetBranchesCoreAsync(owner, repo);
+
+        if (isCacheable)
+        {
+            await cache.SetAsync(cacheKey, response, new CacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = isStableState
+                    ? RepositoryPublicReadCache.StableTtl
+                    : RepositoryPublicReadCache.VolatileTtl
+            });
+        }
+
+        return response;
+    }
+
+    private async Task<(RepositoryBranchesResponse Response, bool IsCacheable, bool IsStableState)> GetBranchesCoreAsync(string owner, string repo)
+    {
         var repository = await GetRepositoryAsync(owner, repo);
 
         if (repository is null)
         {
-            return new RepositoryBranchesResponse { Branches = [], Languages = [] };
+            // 仓库不存在：缓存短 TTL，防止爬虫扫描不存在路径造成穿透
+            return (new RepositoryBranchesResponse { Branches = [], Languages = [] }, IsCacheable: true, IsStableState: false);
         }
+
+        var isStableState = repository.Status == RepositoryStatus.Completed;
+        var isCacheable = repository.IsPublic;
 
         var branches = await context.RepositoryBranches
             .AsNoTracking()
@@ -114,14 +145,31 @@ public class RepositoryDocsService(
         var finalDefaultLanguage = defaultLanguageCode 
             ?? (allLanguages.Contains(FallbackLanguageCode) ? FallbackLanguageCode : allLanguages.FirstOrDefault() ?? "");
 
-        return new RepositoryBranchesResponse
+        return (new RepositoryBranchesResponse
         {
             RepositoryId = repository.Id,
             Branches = branchItems,
             Languages = allLanguages.ToList(),
             DefaultBranch = defaultBranch,
             DefaultLanguage = finalDefaultLanguage
-        };
+        }, isCacheable, isStableState);
+    }
+
+    private async Task<string> GetRepoCacheVersionAsync(string owner, string repo)
+    {
+        var key = RepositoryPublicReadCache.BuildVersionKey(owner, repo);
+        var version = await cache.GetAsync<string>(key);
+        if (!string.IsNullOrWhiteSpace(version))
+        {
+            return version;
+        }
+
+        version = Guid.NewGuid().ToString("N");
+        await cache.SetAsync(key, version, new CacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = RepositoryPublicReadCache.VersionTtl
+        });
+        return version;
     }
 
     [HttpGet("/{owner}/{repo}/tree")]
@@ -129,27 +177,56 @@ public class RepositoryDocsService(
     {
         (owner, repo) = RepositoryRouteDecoder.DecodeOwnerAndRepo(owner, repo);
 
+        var version = await GetRepoCacheVersionAsync(owner, repo);
+        var cacheKey = RepositoryPublicReadCache.BuildEntryKey("repos:tree", version, owner, repo, branch, lang);
+
+        var cached = await cache.GetAsync<RepositoryTreeResponse>(cacheKey);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var (response, isCacheable, isStableState) = await GetTreeCoreAsync(owner, repo, branch, lang);
+
+        if (isCacheable)
+        {
+            await cache.SetAsync(cacheKey, response, new CacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = isStableState
+                    ? RepositoryPublicReadCache.StableTtl
+                    : RepositoryPublicReadCache.VolatileTtl
+            });
+        }
+
+        return response;
+    }
+
+    private async Task<(RepositoryTreeResponse Response, bool IsCacheable, bool IsStableState)> GetTreeCoreAsync(string owner, string repo, string? branch, string? lang)
+    {
         var repository = await GetRepositoryAsync(owner, repo);
 
         // 仓库不存在
         if (repository is null)
         {
-            return new RepositoryTreeResponse
+            // 缓存短 TTL，防止爬虫扫描不存在路径造成缓存穿透
+            return (new RepositoryTreeResponse
             {
                 Owner = owner,
                 Repo = repo,
                 Exists = false,
                 Status = RepositoryStatus.Pending,
                 Nodes = []
-            };
+            }, IsCacheable: true, IsStableState: false);
         }
 
         var canControl = CanControlRepository(repository);
+        var isStableState = repository.Status == RepositoryStatus.Completed;
+        var isCacheable = repository.IsPublic;
 
         // 仓库正在处理中或等待处理
         if (repository.Status == RepositoryStatus.Pending || repository.Status == RepositoryStatus.Processing)
         {
-            return new RepositoryTreeResponse
+            return (new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -157,14 +234,14 @@ public class RepositoryDocsService(
                 Status = repository.Status,
                 CanControl = canControl,
                 Nodes = []
-            };
+            }, isCacheable, isStableState);
         }
 
         // 仓库处理完成或失败，获取文档目录
         var branchEntity = await GetBranchAsync(repository.Id, branch);
         if (branchEntity is null)
         {
-            return new RepositoryTreeResponse
+            return (new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -172,14 +249,14 @@ public class RepositoryDocsService(
                 Status = repository.Status,
                 CanControl = canControl,
                 Nodes = []
-            };
+            }, isCacheable, isStableState);
         }
 
         var language = await GetLanguageAsync(branchEntity.Id, lang);
         var graphifyState = await GetGraphifyStateAsync(branchEntity.Id);
         if (language is null)
         {
-            return new RepositoryTreeResponse
+            return (new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -191,7 +268,7 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            }, isCacheable, isStableState);
         }
 
         var catalogs = await context.DocCatalogs
@@ -203,7 +280,7 @@ public class RepositoryDocsService(
         if (catalogs.Count == 0)
         {
             // 仓库已完成但没有文档，可能是空仓库
-            return new RepositoryTreeResponse
+            return (new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -216,14 +293,14 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            }, isCacheable, isStableState);
         }
 
         // 构建树形结构
         var readyCatalogs = FilterToReadyWithAncestors(catalogs);
         if (readyCatalogs.Count == 0)
         {
-            return new RepositoryTreeResponse
+            return (new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -236,7 +313,7 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            }, isCacheable, isStableState);
         }
 
         var catalogMap = readyCatalogs.ToDictionary(c => c.Id);
@@ -250,7 +327,7 @@ public class RepositoryDocsService(
         // 递归查找第一个有实际内容的文档
         var defaultSlug = FindFirstContentSlug(readyCatalogs, null) ?? string.Empty;
 
-        return new RepositoryTreeResponse
+        return (new RepositoryTreeResponse
         {
             Owner = repository.OrgName,
             Repo = repository.RepoName,
@@ -264,7 +341,7 @@ public class RepositoryDocsService(
             HasGraphifyArtifact = graphifyState.HasArtifact,
             GraphifyStatus = graphifyState.Status,
             GraphifyStatusName = graphifyState.StatusName
-        };
+        }, isCacheable, isStableState);
     }
 
     private bool CanControlRepository(Repository repository)
@@ -384,22 +461,52 @@ public class RepositoryDocsService(
         (owner, repo) = RepositoryRouteDecoder.DecodeOwnerAndRepo(owner, repo);
         var normalizedSlug = NormalizePath(slug);
 
+        var version = await GetRepoCacheVersionAsync(owner, repo);
+        var cacheKey = RepositoryPublicReadCache.BuildEntryKey($"repos:doc:{normalizedSlug}", version, owner, repo, branch, lang);
+
+        var cached = await cache.GetAsync<RepositoryDocResponse>(cacheKey);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var (response, isCacheable, isStableState) = await GetDocCoreAsync(owner, repo, normalizedSlug, branch, lang);
+
+        if (isCacheable)
+        {
+            await cache.SetAsync(cacheKey, response, new CacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = isStableState
+                    ? RepositoryPublicReadCache.StableTtl
+                    : RepositoryPublicReadCache.VolatileTtl
+            });
+        }
+
+        return response;
+    }
+
+    private async Task<(RepositoryDocResponse Response, bool IsCacheable, bool IsStableState)> GetDocCoreAsync(string owner, string repo, string normalizedSlug, string? branch, string? lang)
+    {
         var repository = await GetRepositoryAsync(owner, repo);
         if (repository is null)
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            // 缓存短 TTL，防止爬虫扫描不存在路径造成缓存穿透
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, IsCacheable: true, IsStableState: false);
         }
+
+        var isCacheable = repository.IsPublic;
+        var isStableState = repository.Status == RepositoryStatus.Completed;
 
         var branchEntity = await GetBranchAsync(repository.Id, branch);
         if (branchEntity is null)
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, isCacheable, isStableState);
         }
 
         var language = await GetLanguageAsync(branchEntity.Id, lang);
         if (language is null)
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, isCacheable, isStableState);
         }
 
         var catalog = await context.DocCatalogs
@@ -408,7 +515,7 @@ public class RepositoryDocsService(
 
         if (catalog is null)
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, isCacheable, isStableState);
         }
 
         var hasChildren = await context.DocCatalogs
@@ -417,7 +524,7 @@ public class RepositoryDocsService(
 
         if (hasChildren || string.IsNullOrEmpty(catalog.DocFileId))
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, isCacheable, isStableState);
         }
 
         var docFile = await context.DocFiles
@@ -426,7 +533,7 @@ public class RepositoryDocsService(
 
         if (docFile is null)
         {
-            return new RepositoryDocResponse { Slug = normalizedSlug, Exists = false };
+            return (new RepositoryDocResponse { Slug = normalizedSlug, Exists = false }, isCacheable, isStableState);
         }
 
         // 解析来源文件列表
@@ -443,7 +550,7 @@ public class RepositoryDocsService(
             }
         }
 
-        return new RepositoryDocResponse
+        return (new RepositoryDocResponse
         {
             Slug = normalizedSlug,
             Content = docFile.Content,
@@ -451,7 +558,7 @@ public class RepositoryDocsService(
             GitUrl = repository.GitUrl,
             Branch = branchEntity.BranchName,
             Exists = true
-        };
+        }, isCacheable, isStableState);
     }
 
     /// <summary>
@@ -461,9 +568,19 @@ public class RepositoryDocsService(
     public async Task<GitRepoCheckResponse> CheckRepoAsync(string owner, string repo)
     {
         (owner, repo) = RepositoryRouteDecoder.DecodeOwnerAndRepo(owner, repo);
+
+        // 结果来自 Git 平台公开 API，有外部配额限制，必须缓存：
+        // 爬虫扫描大量无效 owner/repo 时会在此处打爆 GitHub/Gitee 配额
+        var cacheKey = $"repos:gitcheck:{owner.ToLowerInvariant()}:{repo.ToLowerInvariant()}";
+        var cached = await cache.GetAsync<GitRepoCheckResponse>(cacheKey);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
         var repoInfo = await gitPlatformService.CheckRepoExistsAsync(owner, repo);
-        
-        return new GitRepoCheckResponse
+
+        var response = new GitRepoCheckResponse
         {
             Exists = repoInfo.Exists,
             Name = repoInfo.Name,
@@ -476,6 +593,13 @@ public class RepositoryDocsService(
             IsPrivate = repoInfo.IsPrivate,
             GitUrl = $"https://github.com/{owner}/{repo}"
         };
+
+        await cache.SetAsync(cacheKey, response, new CacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = GitPlatformCacheTtl
+        });
+
+        return response;
     }
 
     private async Task<Repository?> GetRepositoryAsync(string owner, string repo)

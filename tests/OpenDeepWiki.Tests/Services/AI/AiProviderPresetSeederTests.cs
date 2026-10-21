@@ -16,16 +16,32 @@ public class AiProviderPresetSeederTests
     {
         var catalog = new AiProviderPresetCatalog();
 
-        Assert.Equal(27, catalog.Presets.Count);
-        Assert.Equal(436, catalog.Presets.Sum(p => p.DefaultModels.Count));
+        Assert.Equal(29, catalog.Presets.Count);
+        Assert.Equal(450, catalog.Presets.Sum(p => p.DefaultModels.Count));
         Assert.Contains(catalog.Presets, p => p.BuiltinId == "routin-ai" && p.DefaultEnabled == true);
         Assert.Contains(catalog.Presets, p => p.BuiltinId == "codex-oauth" && p.AuthMode == "oauth");
         Assert.Contains(catalog.Presets.Single(p => p.BuiltinId == "openai").DefaultModels,
             model => model.Id == "gpt-5.2");
+        Assert.Contains(catalog.Presets.Single(p => p.BuiltinId == "openai").DefaultModels,
+            model => model.Id == "gpt-6-astra");
+        Assert.Contains(catalog.Presets.Single(p => p.BuiltinId == "anthropic").DefaultModels,
+            model => model.Id == "claude-opus-5-5");
+        Assert.Contains(catalog.Presets.Single(p => p.BuiltinId == "moonshot").DefaultModels,
+            model => model.Id == "kimi-k3");
+        Assert.Contains(catalog.Presets.Single(p => p.BuiltinId == "bigmodel").DefaultModels,
+            model => model.Id == "glm-5.3");
         Assert.Contains(catalog.Presets,
             p => p.BuiltinId == "orcarouter" &&
                  p.DefaultBaseUrl == "https://api.orcarouter.ai/v1" &&
                  p.DefaultModels.Any(m => m.Id == "orcarouter/auto"));
+        Assert.Contains(catalog.Presets,
+            p => p.BuiltinId == "requesty" &&
+                 p.DefaultBaseUrl == "https://router.requesty.ai/v1" &&
+                 p.DefaultModels.Any(m => m.Id == "claude-sonnet-4-6"));
+        Assert.Contains(catalog.Presets,
+            p => p.BuiltinId == "cheaperinference" &&
+                 p.DefaultBaseUrl == "https://api.cheaperinference.com/v1" &&
+                 p.DefaultModels.Any(m => m.Id == "gpt-5.4-mini"));
     }
 
     [Fact]
@@ -37,8 +53,20 @@ public class AiProviderPresetSeederTests
         await seeder.EnsureBuiltInProvidersAsync();
         await seeder.EnsureBuiltInProvidersAsync();
 
-        Assert.Equal(27, await context.AiProviderConfigs.CountAsync(p => !p.IsDeleted));
-        Assert.Equal(436, await context.AiModelConfigs.CountAsync(m => !m.IsDeleted));
+        Assert.Equal(29, await context.AiProviderConfigs.CountAsync(p => !p.IsDeleted));
+        Assert.Equal(611, await context.AiModelConfigs.CountAsync(m => !m.IsDeleted));
+
+        var apiRoute = await context.AiProviderConfigs.SingleAsync(p => p.Name == "api-route");
+        Assert.True(apiRoute.IsBuiltIn);
+        Assert.False(apiRoute.IsActive);
+        Assert.Equal("OpenAI", apiRoute.ProviderType);
+        Assert.Equal("https://global.api-route.com/v1", apiRoute.BaseUrl);
+        Assert.Equal("deepseek-v4-flash", apiRoute.DefaultModelId);
+        Assert.Equal("https://www.api-route.com/images/logo-ginkgo.png", apiRoute.IconUrl);
+        var apiRouteModel = await context.AiModelConfigs.SingleAsync(m =>
+            m.ProviderId == apiRoute.Id && m.ModelId == "deepseek-v4-flash");
+        Assert.Null(apiRouteModel.InputTokenPrice);
+        Assert.Null(apiRouteModel.OutputTokenPrice);
 
         var codex = await context.AiProviderConfigs.SingleAsync(p => p.Name == "codex-oauth");
         Assert.True(codex.IsBuiltIn);
