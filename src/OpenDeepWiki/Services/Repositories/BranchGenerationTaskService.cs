@@ -49,6 +49,10 @@ public sealed class BranchGenerationTaskService(
             return new BranchGenerationTaskResult(false, ErrorCode: "REPOSITORY_NOT_FOUND", ErrorMessage: "仓库不存在");
         }
 
+        if (repository.SourceType == RepositorySourceType.Documentation)
+            return new BranchGenerationTaskResult(false, ErrorCode: "DOCUMENTATION_ONLY",
+                ErrorMessage: "导入的知识库没有源码，无法重新生成；现有文档已保留");
+
         var branch = await context.RepositoryBranches
             .FirstOrDefaultAsync(item => item.Id == branchId && item.RepositoryId == repositoryId && !item.IsDeleted, cancellationToken);
 

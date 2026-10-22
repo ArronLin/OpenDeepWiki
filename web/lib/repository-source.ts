@@ -1,7 +1,7 @@
-export const REPOSITORY_SOURCE_TYPE_NAMES = ["Git", "Archive", "LocalDirectory"] as const;
+export const REPOSITORY_SOURCE_TYPE_NAMES = ["Git", "Archive", "LocalDirectory", "Documentation"] as const;
 
 export type RepositorySourceTypeName = (typeof REPOSITORY_SOURCE_TYPE_NAMES)[number];
-export type RepositorySourceTypeValue = RepositorySourceTypeName | 0 | 1 | 2;
+export type RepositorySourceTypeValue = RepositorySourceTypeName | 0 | 1 | 2 | 3;
 
 function normalizeNumericRepositorySourceType(value: number): RepositorySourceTypeName | null {
   switch (value) {
@@ -11,6 +11,8 @@ function normalizeNumericRepositorySourceType(value: number): RepositorySourceTy
       return "Archive";
     case 2:
       return "LocalDirectory";
+    case 3:
+      return "Documentation";
     default:
       return null;
   }
@@ -28,6 +30,8 @@ function normalizeNamedRepositorySourceType(value: unknown): RepositorySourceTyp
     case "local-directory":
     case "local_directory":
       return "LocalDirectory";
+    case "documentation":
+      return "Documentation";
     default:
       return null;
   }
@@ -73,6 +77,8 @@ export function getRepositorySourceTypeLabelKey(
       return "sourceTypeArchive";
     case "LocalDirectory":
       return "sourceTypeLocal";
+    case "Documentation":
+      return "sourceTypeDocumentation";
     default:
       return "sourceTypeGit";
   }

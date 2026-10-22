@@ -215,6 +215,7 @@ try
     // 注册 Wiki Generator
     builder.Services.AddScoped<IWikiGenerator, WikiGenerator>();
     builder.Services.AddScoped<IRepositorySkillMarkdownBuilder, RepositorySkillMarkdownBuilder>();
+    builder.Services.AddScoped<DocumentationImportService>();
 
     // 注册缓存框架（默认内存实现）
     builder.Services.AddOpenDeepWikiCache();

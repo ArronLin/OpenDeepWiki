@@ -294,6 +294,10 @@ public class IncrementalUpdateService : IIncrementalUpdateService
             "Manual update triggered. RepositoryId: {RepositoryId}, BranchId: {BranchId}",
             repositoryId, branchId);
 
+        if (await _context.Repositories.AnyAsync(r => r.Id == repositoryId &&
+                r.GitUrl.StartsWith(RepositorySource.DocumentationPrefix), cancellationToken))
+            throw new InvalidOperationException("导入的知识库没有源码，无法增量更新");
+
         var existingTask = await _context.IncrementalUpdateTasks
             .Where(t => !t.IsDeleted &&
                         t.RepositoryId == repositoryId &&

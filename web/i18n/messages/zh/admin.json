@@ -158,6 +158,7 @@
     "repoName": "仓库名称",
     "sourceType": "来源类型",
     "sourceLocation": "来源位置",
+    "sourceTypeDocumentation": "导入已生成文档",
     "sourceTypeGit": "Git 仓库",
     "sourceTypeArchive": "ZIP 压缩包",
     "sourceTypeLocal": "服务器目录",

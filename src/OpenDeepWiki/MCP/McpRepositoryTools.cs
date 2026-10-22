@@ -72,7 +72,7 @@ public class McpRepositoryTools
         var tools = new List<AITool>();
         var repoPath = RepositoryWorkspacePath.Resolve(
             repoOptions.Value, resolvedOwner!, resolvedName!, branch.BranchName);
-        if (Directory.Exists(repoPath))
+        if (repository.SourceType != RepositorySourceType.Documentation && Directory.Exists(repoPath))
         {
             try
             {
@@ -131,7 +131,7 @@ public class McpRepositoryTools
             };
         }).ToList();
 
-        var summary = await BuildSearchSummaryAsync(
+        var summary = repository.SourceType == RepositorySourceType.Documentation ? null : await BuildSearchSummaryAsync(
             context,
             agentFactory,
             aiProviderResolver,
@@ -187,6 +187,8 @@ public class McpRepositoryTools
 
         // The MCP scope carries owner/repo only, so the branch owning the workspace has to
         // come from the database.
+        if (repository.SourceType == RepositorySourceType.Documentation)
+            return JsonSerializer.Serialize(new { error = true, message = "This knowledge base contains generated documents only. Use SearchDoc or the global ReadDoc tool." });
         var branch = await context.RepositoryBranches
             .FirstOrDefaultAsync(b => b.RepositoryId == repository.Id && !b.IsDeleted, cancellationToken);
 
@@ -245,6 +247,8 @@ public class McpRepositoryTools
 
         // The MCP scope carries owner/repo only, so the branch owning the workspace has to
         // come from the database.
+        if (repository.SourceType == RepositorySourceType.Documentation)
+            return JsonSerializer.Serialize(new { error = true, message = "This knowledge base contains generated documents only. Use SearchDoc or the global ReadDoc tool." });
         var branch = await context.RepositoryBranches
             .FirstOrDefaultAsync(b => b.RepositoryId == repository.Id && !b.IsDeleted, cancellationToken);
 

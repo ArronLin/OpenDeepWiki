@@ -9,7 +9,8 @@ public enum RepositorySourceType
 {
     Git = 0,
     Archive = 1,
-    LocalDirectory = 2
+    LocalDirectory = 2,
+    Documentation = 3
 }
 
 /// <summary>
@@ -33,6 +34,7 @@ public readonly record struct RepositorySourceInfo(RepositorySourceType SourceTy
 /// </summary>
 public static class RepositorySource
 {
+    public const string DocumentationPrefix = "docs::";
     private const string ArchivePrefix = "archive::";
     private const string LocalDirectoryPrefix = "local::";
 
@@ -51,6 +53,11 @@ public static class RepositorySource
         if (string.IsNullOrWhiteSpace(storedSource))
         {
             return new RepositorySourceInfo(RepositorySourceType.Git, string.Empty);
+        }
+
+        if (storedSource.StartsWith(DocumentationPrefix, StringComparison.Ordinal))
+        {
+            return new RepositorySourceInfo(RepositorySourceType.Documentation, string.Empty);
         }
 
         if (storedSource.StartsWith(ArchivePrefix, StringComparison.Ordinal))

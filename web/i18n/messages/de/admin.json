@@ -158,6 +158,7 @@
     "repoName": "Repository-Name",
     "sourceType": "Quelltyp",
     "sourceLocation": "Quellort",
+    "sourceTypeDocumentation": "Import generated docs",
     "sourceTypeGit": "Git-Repository",
     "sourceTypeArchive": "ZIP-Archiv",
     "sourceTypeLocal": "Serververzeichnis",

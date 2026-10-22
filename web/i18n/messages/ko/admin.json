@@ -118,6 +118,7 @@
     "repoName": "저장소명",
     "sourceType": "소스 유형",
     "sourceLocation": "소스 위치",
+    "sourceTypeDocumentation": "Import generated docs",
     "sourceTypeGit": "Git 저장소",
     "sourceTypeArchive": "ZIP 압축 파일",
     "sourceTypeLocal": "서버 디렉터리",

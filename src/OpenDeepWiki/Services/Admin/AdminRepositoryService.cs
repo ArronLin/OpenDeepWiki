@@ -923,6 +923,16 @@ public class AdminRepositoryService : IAdminRepositoryService
             };
         }
 
+        if (repository.SourceType == RepositorySourceType.Documentation)
+        {
+            return new AdminRepositoryOperationResult
+            {
+                Success = false,
+                Message = "导入的知识库没有源码，无法重新生成；现有文档已保留",
+                StatusCode = StatusCodes.Status409Conflict
+            };
+        }
+
         if (repository.Status == RepositoryStatus.Pending || repository.Status == RepositoryStatus.Processing)
         {
             return new AdminRepositoryOperationResult

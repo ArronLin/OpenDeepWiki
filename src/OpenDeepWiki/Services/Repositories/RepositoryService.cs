@@ -492,6 +492,9 @@ public class RepositoryService(
         }
 
         // 只有失败或完成状态才能重新生成
+        if (repository.SourceType == RepositorySourceType.Documentation)
+            return Results.Conflict(Error("导入的知识库没有源码，无法重新生成；现有文档已保留"));
+
         if (repository.Status != RepositoryStatus.Failed && repository.Status != RepositoryStatus.Completed)
         {
             return Results.Conflict(Error("仓库正在处理中，无法重新生成"));

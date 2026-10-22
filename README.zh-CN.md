@@ -9,6 +9,8 @@
 
 OpenDeepWiki 可以把 Git 仓库、ZIP 压缩包和本地目录转换成可检索的代码知识库。它会生成结构化仓库文档，通过 Next.js 公共站点对外提供阅读入口，并把同一份仓库知识复用到聊天、嵌入式对话和 MCP 场景中。
 
+也支持[导入另一台机器已生成的文档 ZIP](docs/import-generated-documents.md)：无需源码或模型调用，导入后可在本机页面和 MCP 查询，并保留已有知识库。
+
 企业支持与定价：[docs.opendeep.wiki/pricing](https://docs.opendeep.wiki/pricing)
 
 ## 当前版本能做什么

@@ -555,7 +555,7 @@ public class RepositoryDocsService(
             Slug = normalizedSlug,
             Content = docFile.Content,
             SourceFiles = sourceFiles,
-            GitUrl = repository.GitUrl,
+            GitUrl = repository.SourceType == RepositorySourceType.Documentation ? null : repository.GitUrl,
             Branch = branchEntity.BranchName,
             Exists = true
         }, isCacheable, isStableState);
@@ -829,6 +829,14 @@ public class RepositoryDocsService(
             using var memoryStream = new MemoryStream();
             using (var archive = new ZipArchive(memoryStream, ZipArchiveMode.Create, true))
             {
+                var manifestEntry = archive.CreateEntry(DocumentationArchive.EntryName);
+                await using (var manifestStream = manifestEntry.Open())
+                {
+                    await System.Text.Json.JsonSerializer.SerializeAsync(manifestStream,
+                        DocumentationArchive.Create(branchEntity, language, catalogs),
+                        new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+                }
+
                 var skillMarkdown = string.IsNullOrWhiteSpace(language.SkillMarkdown)
                     ? skillMarkdownBuilder.BuildSkillMarkdown(repository, branchEntity, language, catalogs, now)
                     : language.SkillMarkdown;

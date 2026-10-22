@@ -20,7 +20,45 @@ public static class RepositoryUploadEndpoints
             .WithSummary("通过 ZIP 压缩包创建仓库")
             .DisableAntiforgery();
 
+        app.MapPost("/api/v1/repositories/import-documents", ImportDocumentsAsync)
+            .WithTags("仓库")
+            .WithName("ImportRepositoryDocuments")
+            .WithSummary("导入已生成的文档 ZIP（无需源码或模型）")
+            .RequireAuthorization()
+            .WithMetadata(new RequestSizeLimitAttribute(DocumentationImportService.MaxUploadBytes + 1024 * 1024))
+            .DisableAntiforgery();
+
         return app;
+    }
+
+    private static async Task<IResult> ImportDocumentsAsync(HttpRequest request,
+        [FromServices] DocumentationImportService service, CancellationToken cancellationToken)
+    {
+        if (!request.HasFormContentType)
+            return Results.BadRequest(new { message = "请使用 multipart/form-data 格式上传" });
+        try
+        {
+            var form = await request.ReadFormAsync(cancellationToken);
+            var file = form.Files["archive"];
+            if (file is null)
+                return Results.BadRequest(new { message = "请上传文档 ZIP" });
+            return Results.Ok(await service.ImportAsync(file,
+                form["orgName"].ToString(), form["repoName"].ToString(),
+                bool.TryParse(form["isPublic"], out var isPublic) && isPublic,
+                form["branchName"].ToString(), form["languageCode"].ToString(), cancellationToken));
+        }
+        catch (InvalidDataException ex)
+        {
+            return Results.BadRequest(new { message = ex.Message });
+        }
+        catch (System.Text.DecoderFallbackException)
+        {
+            return Results.BadRequest(new { message = "文档包必须使用有效的 UTF-8 文本编码" });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Conflict(new { message = ex.Message });
+        }
     }
 
     private static async Task<IResult> SubmitArchiveAsync(

@@ -15,6 +15,7 @@ import { useTranslations } from "@/hooks/use-translations";
 import {
   submitRepository,
   submitArchiveRepository,
+  importRepositoryDocuments,
   submitLocalDirectoryRepository,
   fetchGitBranches,
   checkGitHubRepo,
@@ -74,6 +75,12 @@ const SOURCE_OPTIONS: Array<{
     icon: FolderOpen,
     labelKey: "sourceTypeLocal",
     descriptionKey: "sourceTypeLocalDescription",
+  },
+  {
+    value: "Documentation",
+    icon: Archive,
+    labelKey: "sourceTypeDocumentation",
+    descriptionKey: "sourceTypeDocumentationDescription",
   },
 ];
 
@@ -194,13 +201,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
   }, [resetGitBranchState]);
 
   useEffect(() => {
-    if (sourceType !== "Git") {
-      resetGitBranchState();
-      setAuthAccount("");
-      setAuthPassword("");
-      setIsPublic(false);
-      return;
-    }
+    if (sourceType !== "Git") return;
 
     const timer = setTimeout(() => {
       if (gitUrl.trim() && GIT_URL_REGEX.test(gitUrl.trim())) {
@@ -209,21 +210,28 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [sourceType, gitUrl, fetchBranchesDebounced, resetGitBranchState]);
+  }, [sourceType, gitUrl, fetchBranchesDebounced]);
 
-  useEffect(() => {
-    if (sourceType !== "Git") {
-      return;
+  const fillNamesFromGitUrl = (url: string) => {
+    const parsed = parseGitUrl(url.trim());
+    if (parsed) {
+      setOrgName((current) => current.trim() || parsed.orgName);
+      setRepoName((current) => current.trim() || parsed.repoName);
     }
+  };
 
-    const parsed = parseGitUrl(gitUrl.trim());
-    if (!parsed) {
-      return;
+  const selectSource = (value: RepositorySourceType) => {
+    setSourceType(value);
+    setErrors({});
+    resetGitBranchState();
+    if (value !== "Git") {
+      setAuthAccount("");
+      setAuthPassword("");
+      setIsPublic(false);
+    } else {
+      fillNamesFromGitUrl(gitUrl);
     }
-
-    setOrgName((current) => current.trim() || parsed.orgName);
-    setRepoName((current) => current.trim() || parsed.repoName);
-  }, [gitUrl, sourceType]);
+  };
 
   const filteredBranches = branches.filter((branch) =>
     branch.name.toLowerCase().includes(branchSearch.toLowerCase())
@@ -251,11 +259,13 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
       newErrors.repoName = t("home.repository.repoNameRequired");
     }
 
-    if (sourceType === "Archive") {
+    if (sourceType === "Archive" || sourceType === "Documentation") {
       if (!archiveFile) {
         newErrors.archive = t("home.repository.archiveFileRequired");
       } else if (!archiveFile.name.toLowerCase().endsWith(".zip")) {
         newErrors.archive = t("home.repository.archiveFileInvalid");
+      } else if (sourceType === "Documentation" && archiveFile.size > 50 * 1024 * 1024) {
+        newErrors.archive = t("home.repository.documentArchiveTooLarge");
       }
     }
 
@@ -263,11 +273,11 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
       newErrors.localPath = t("home.repository.localPathRequired");
     }
 
-    if (!branchName.trim()) {
+    if (sourceType !== "Documentation" && !branchName.trim()) {
       newErrors.branchName = t("home.repository.branchNameRequired");
     }
 
-    if (!languageCode) {
+    if (sourceType !== "Documentation" && !languageCode) {
       newErrors.languageCode = t("home.repository.languageRequired");
     }
 
@@ -303,7 +313,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
         };
 
         await submitRepository(request);
-      } else if (sourceType === "Archive" && archiveFile) {
+      } else if ((sourceType === "Archive" || sourceType === "Documentation") && archiveFile) {
         const request: ArchiveRepositorySubmitRequest = {
           repoName: effectiveRepoName,
           orgName: effectiveOrgName,
@@ -314,7 +324,11 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
           archive: archiveFile,
         };
 
-        await submitArchiveRepository(request);
+        if (sourceType === "Documentation") {
+          await importRepositoryDocuments(request);
+        } else {
+          await submitArchiveRepository(request);
+        }
       } else {
         const request: LocalDirectoryRepositorySubmitRequest = {
           repoName: effectiveRepoName,
@@ -329,7 +343,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
         await submitLocalDirectoryRepository(request);
       }
 
-      toast.success(t("home.repository.submitSuccess"));
+      toast.success(t(sourceType === "Documentation" ? "home.repository.documentImportSuccess" : "home.repository.submitSuccess"));
       resetForm();
       onSuccess?.();
     } catch (error) {
@@ -338,6 +352,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
           ? error.message
           : t("home.repository.submitError");
       toast.error(message || t("home.repository.submitError"));
+      if (sourceType === "Documentation") setErrors({ archive: message });
       console.error("Failed to submit repository:", error);
     } finally {
       setIsSubmitting(false);
@@ -358,7 +373,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
 
       <div className="space-y-3">
         <label className="text-sm font-medium">{t("home.repository.sourceType")}</label>
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2">
           {SOURCE_OPTIONS.map((option) => {
             const Icon = option.icon;
             const isActive = sourceType === option.value;
@@ -367,13 +382,15 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
               <button
                 key={option.value}
                 type="button"
+                aria-pressed={isActive}
+                disabled={isSubmitting}
                 className={cn(
                   "rounded-xl border px-4 py-3 text-left transition-all",
                   isActive
                     ? "border-teal-500 bg-teal-500/10 shadow-sm"
                     : "border-border bg-secondary/40 hover:bg-secondary/70"
                 )}
-                onClick={() => setSourceType(option.value)}
+                onClick={() => selectSource(option.value)}
               >
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Icon className="h-4 w-4" />
@@ -396,7 +413,10 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
           </label>
           <Input
             value={gitUrl}
-            onChange={(event) => setGitUrl(event.target.value)}
+            onChange={(event) => {
+              setGitUrl(event.target.value);
+              fillNamesFromGitUrl(event.target.value);
+            }}
             placeholder={t("home.repository.gitUrlPlaceholder")}
             aria-invalid={!!errors.gitUrl}
             className="h-11 border-transparent bg-secondary/50 transition-colors focus:border-primary/50"
@@ -405,22 +425,26 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
         </div>
       )}
 
-      {sourceType === "Archive" && (
+      {(sourceType === "Archive" || sourceType === "Documentation") && (
         <div className="space-y-2">
-          <label className="flex items-center gap-2 text-sm font-medium">
+          <label htmlFor="repository-archive" className="flex items-center gap-2 text-sm font-medium">
             <Archive className="h-4 w-4 text-muted-foreground" />
             {t("home.repository.archiveFile")}
           </label>
           <Input
+            id="repository-archive"
             key={fileInputKey}
             type="file"
             accept=".zip,application/zip"
             onChange={(event) => setArchiveFile(event.target.files?.[0] ?? null)}
             aria-invalid={!!errors.archive}
+            aria-describedby="repository-archive-hint repository-archive-error"
             className="h-11 border-transparent bg-secondary/50 file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium"
           />
-          <p className="text-xs text-muted-foreground">{t("home.repository.archiveHint")}</p>
-          {errors.archive && <p className="text-sm text-destructive">{errors.archive}</p>}
+          <p id="repository-archive-hint" className="text-xs text-muted-foreground">
+            {t(sourceType === "Documentation" ? "home.repository.documentArchiveHint" : "home.repository.archiveHint")}
+          </p>
+          <p id="repository-archive-error" role="alert" className="text-sm text-destructive">{errors.archive}</p>
         </div>
       )}
 
@@ -467,139 +491,143 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
         </div>
       </div>
 
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <GitBranch className="h-4 w-4 text-muted-foreground" />
-            {t("home.repository.branchName")}
-          </label>
-          {sourceType === "Git" && branches.length > 0 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              onClick={() => setIsManualInput((current) => !current)}
-            >
-              <Edit3 className="mr-1 h-3 w-3" />
-              {isManualInput ? t("home.repository.selectBranch") : t("home.repository.manualInput")}
-            </Button>
-          )}
-        </div>
-
-        {sourceType === "Git" && isLoadingBranches ? (
-          <div className="flex h-11 items-center gap-2 rounded-md bg-secondary/50 px-3">
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">{t("home.repository.loadingBranches")}</span>
-          </div>
-        ) : sourceType === "Git" && !isManualInput && isSupported && branches.length > 0 ? (
-          <Select value={branchName} onValueChange={setBranchName}>
-            <SelectTrigger className="h-11 w-full border-transparent bg-secondary/50 transition-colors focus:border-primary/50">
-              <SelectValue placeholder={t("home.repository.selectBranchPlaceholder")} />
-            </SelectTrigger>
-            <SelectContent>
-              {branches.length > 10 && (
-                <div className="px-2 pb-2">
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      value={branchSearch}
-                      onChange={(event) => setBranchSearch(event.target.value)}
-                      placeholder={t("home.repository.searchBranch")}
-                      className="h-8 pl-8 text-sm"
-                      onClick={(event) => event.stopPropagation()}
-                    />
-                  </div>
-                </div>
+      {sourceType !== "Documentation" && (
+        <>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <GitBranch className="h-4 w-4 text-muted-foreground" />
+                {t("home.repository.branchName")}
+              </label>
+              {sourceType === "Git" && branches.length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => setIsManualInput((current) => !current)}
+                >
+                  <Edit3 className="mr-1 h-3 w-3" />
+                  {isManualInput ? t("home.repository.selectBranch") : t("home.repository.manualInput")}
+                </Button>
               )}
-              <div className="max-h-[200px] overflow-y-auto">
-                {filteredBranches.length === 0 ? (
-                  <div className="px-2 py-4 text-center text-sm text-muted-foreground">
-                    {t("home.repository.noBranchFound")}
-                  </div>
-                ) : (
-                  filteredBranches.map((branch) => (
-                    <SelectItem key={branch.name} value={branch.name}>
-                      <span className="flex items-center gap-2">
-                        {branch.name}
-                        {branch.isDefault && (
-                          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">
-                            default
-                          </span>
-                        )}
-                      </span>
-                    </SelectItem>
-                  ))
-                )}
+            </div>
+
+            {sourceType === "Git" && isLoadingBranches ? (
+              <div className="flex h-11 items-center gap-2 rounded-md bg-secondary/50 px-3">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                <span className="text-sm text-muted-foreground">{t("home.repository.loadingBranches")}</span>
               </div>
-              {filteredBranches.length > 0 &&
-                branchSearch &&
-                !filteredBranches.find((branch) => branch.name === branchSearch) && (
-                  <div className="border-t px-2 py-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="w-full justify-start text-sm"
-                      onClick={() => {
-                        setBranchName(branchSearch);
-                        setIsManualInput(true);
-                      }}
-                    >
-                      <Edit3 className="mr-2 h-3 w-3" />
-                      {t("home.repository.useCustomBranch")}: {branchSearch}
-                    </Button>
+            ) : sourceType === "Git" && !isManualInput && isSupported && branches.length > 0 ? (
+              <Select value={branchName} onValueChange={setBranchName}>
+                <SelectTrigger className="h-11 w-full border-transparent bg-secondary/50 transition-colors focus:border-primary/50">
+                  <SelectValue placeholder={t("home.repository.selectBranchPlaceholder")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {branches.length > 10 && (
+                    <div className="px-2 pb-2">
+                      <div className="relative">
+                        <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          value={branchSearch}
+                          onChange={(event) => setBranchSearch(event.target.value)}
+                          placeholder={t("home.repository.searchBranch")}
+                          className="h-8 pl-8 text-sm"
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <div className="max-h-[200px] overflow-y-auto">
+                    {filteredBranches.length === 0 ? (
+                      <div className="px-2 py-4 text-center text-sm text-muted-foreground">
+                        {t("home.repository.noBranchFound")}
+                      </div>
+                    ) : (
+                      filteredBranches.map((branch) => (
+                        <SelectItem key={branch.name} value={branch.name}>
+                          <span className="flex items-center gap-2">
+                            {branch.name}
+                            {branch.isDefault && (
+                              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">
+                                default
+                              </span>
+                            )}
+                          </span>
+                        </SelectItem>
+                      ))
+                    )}
                   </div>
-                )}
-            </SelectContent>
-          </Select>
-        ) : (
-          <Input
-            value={branchName}
-            onChange={(event) => setBranchName(event.target.value)}
-            placeholder={t("home.repository.branchNamePlaceholder")}
-            aria-invalid={!!errors.branchName}
-            className="h-11 border-transparent bg-secondary/50 transition-colors focus:border-primary/50"
-          />
-        )}
+                  {filteredBranches.length > 0 &&
+                    branchSearch &&
+                    !filteredBranches.find((branch) => branch.name === branchSearch) && (
+                      <div className="border-t px-2 py-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="w-full justify-start text-sm"
+                          onClick={() => {
+                            setBranchName(branchSearch);
+                            setIsManualInput(true);
+                          }}
+                        >
+                          <Edit3 className="mr-2 h-3 w-3" />
+                          {t("home.repository.useCustomBranch")}: {branchSearch}
+                        </Button>
+                      </div>
+                    )}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                value={branchName}
+                onChange={(event) => setBranchName(event.target.value)}
+                placeholder={t("home.repository.branchNamePlaceholder")}
+                aria-invalid={!!errors.branchName}
+                className="h-11 border-transparent bg-secondary/50 transition-colors focus:border-primary/50"
+              />
+            )}
 
-        {sourceType === "Git" && !isSupported && gitUrl && GIT_URL_REGEX.test(gitUrl) && (
-          <p className="text-xs text-muted-foreground">{t("home.repository.branchNotSupported")}</p>
-        )}
-        {errors.branchName && <p className="text-sm text-destructive">{errors.branchName}</p>}
-      </div>
-
-      <div className="space-y-2">
-        <label className="text-sm font-medium">{t("home.repository.language")}</label>
-        <Select value={languageCode} onValueChange={setLanguageCode}>
-          <SelectTrigger className="h-11 w-full border-transparent bg-secondary/50 transition-colors focus:border-primary/50">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SUPPORTED_LANGUAGES.map((lang) => (
-              <SelectItem key={lang} value={lang}>
-                {t(`common.languageNames.${lang}`)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {errors.languageCode && <p className="text-sm text-destructive">{errors.languageCode}</p>}
-      </div>
-
-      <div className="flex items-center justify-between rounded-xl bg-secondary/50 p-4">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500">
-            <Archive className="h-4 w-4" />
+            {sourceType === "Git" && !isSupported && gitUrl && GIT_URL_REGEX.test(gitUrl) && (
+              <p className="text-xs text-muted-foreground">{t("home.repository.branchNotSupported")}</p>
+            )}
+            {errors.branchName && <p className="text-sm text-destructive">{errors.branchName}</p>}
           </div>
-          <div>
-            <p className="text-sm font-medium">{t("home.repository.generateSkill")}</p>
-            <p className="text-xs text-muted-foreground">
-              {t("home.repository.generateSkillDesc")}
-            </p>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium">{t("home.repository.language")}</label>
+            <Select value={languageCode} onValueChange={setLanguageCode}>
+              <SelectTrigger className="h-11 w-full border-transparent bg-secondary/50 transition-colors focus:border-primary/50">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SUPPORTED_LANGUAGES.map((lang) => (
+                  <SelectItem key={lang} value={lang}>
+                    {t(`common.languageNames.${lang}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {errors.languageCode && <p className="text-sm text-destructive">{errors.languageCode}</p>}
           </div>
-        </div>
-        <Switch checked={generateSkill} onCheckedChange={setGenerateSkill} />
-      </div>
+
+          <div className="flex items-center justify-between rounded-xl bg-secondary/50 p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500">
+                <Archive className="h-4 w-4" />
+              </div>
+              <div>
+                <p className="text-sm font-medium">{t("home.repository.generateSkill")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("home.repository.generateSkillDesc")}
+                </p>
+              </div>
+            </div>
+            <Switch checked={generateSkill} onCheckedChange={setGenerateSkill} />
+          </div>
+        </>
+      )}
 
       <div className="flex items-center justify-between rounded-xl bg-secondary/50 p-4">
         <div className="flex items-center gap-3">
@@ -659,7 +687,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
             {t("home.repository.submitting")}
           </>
         ) : (
-          t("home.repository.submit")
+          t(sourceType === "Documentation" ? "home.repository.importDocuments" : "home.repository.submit")
         )}
       </Button>
     </form>

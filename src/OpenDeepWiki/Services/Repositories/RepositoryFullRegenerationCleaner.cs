@@ -13,6 +13,8 @@ public sealed class RepositoryFullRegenerationCleaner : IRepositoryFullRegenerat
 {
     public async Task CleanAsync(IContext context, Repository repository, CancellationToken cancellationToken = default)
     {
+        if (repository.SourceType == RepositorySourceType.Documentation)
+            throw new InvalidOperationException("导入的知识库没有源码，无法重新生成；现有文档已保留");
         var branches = await context.RepositoryBranches
             .Where(branch => branch.RepositoryId == repository.Id && !branch.IsDeleted)
             .ToListAsync(cancellationToken);

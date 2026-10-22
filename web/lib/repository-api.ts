@@ -154,6 +154,16 @@ export async function submitArchiveRepository(
   return api.post<RepositoryItemResponse>("/api/v1/repositories/submit-archive", formData);
 }
 
+export async function importRepositoryDocuments(request: ArchiveRepositorySubmitRequest): Promise<RepositoryItemResponse> {
+  const formData = new FormData();
+  formData.append("orgName", request.orgName);
+  formData.append("repoName", request.repoName);
+  formData.append("isPublic", String(request.isPublic));
+  formData.append("archive", request.archive);
+  // Branch/language are read from the package; legacy plain Markdown defaults to main/en.
+  return api.post<RepositoryItemResponse>("/api/v1/repositories/import-documents", formData);
+}
+
 export async function submitLocalDirectoryRepository(
   request: LocalDirectoryRepositorySubmitRequest
 ): Promise<RepositoryItemResponse> {

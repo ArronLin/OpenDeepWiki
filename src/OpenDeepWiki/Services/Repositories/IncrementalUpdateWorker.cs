@@ -331,6 +331,7 @@ public class IncrementalUpdateWorker : BackgroundService
 
         var repositoriesToCheck = await context.Repositories
             .Where(r => !r.IsDeleted && r.Status == RepositoryStatus.Completed)
+            .Where(r => !r.GitUrl.StartsWith(RepositorySource.DocumentationPrefix))
             .Where(r => r.LastUpdateCheckAt == null ||
                         r.LastUpdateCheckAt.Value.AddMinutes(
                             r.UpdateIntervalMinutes == null

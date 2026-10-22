@@ -118,6 +118,7 @@
     "repoName": "リポジトリ名",
     "sourceType": "ソース種別",
     "sourceLocation": "ソース場所",
+    "sourceTypeDocumentation": "Import generated docs",
     "sourceTypeGit": "Git リポジトリ",
     "sourceTypeArchive": "ZIP アーカイブ",
     "sourceTypeLocal": "サーバーディレクトリ",

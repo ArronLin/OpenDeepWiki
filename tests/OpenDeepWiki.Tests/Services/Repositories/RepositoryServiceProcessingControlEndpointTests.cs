@@ -280,6 +280,7 @@ public class RepositoryServiceProcessingControlEndpointTests
             Mock.Of<IOrganizationService>(),
             new RepositoryFullRegenerationCleaner(),
             new RepositoryGenerationLockService(context),
+            Mock.Of<OpenDeepWiki.Cache.Abstractions.ICache>(),
             Options.Create(new RepositoryAnalyzerOptions()),
             new RepositoryProcessingControlService(new RepositoryFullRegenerationCleaner()));
     }

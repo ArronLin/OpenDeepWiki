@@ -161,6 +161,8 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     {
         var stopwatch = Stopwatch.StartNew();
         var sourceInfo = RepositorySource.Parse(repository.GitUrl);
+        if (sourceInfo.SourceType == RepositorySourceType.Documentation)
+            throw new InvalidOperationException("导入的知识库只有已生成文档，无法准备源码工作区");
         var workspace = new RepositoryWorkspace
         {
             Organization = repository.OrgName,
