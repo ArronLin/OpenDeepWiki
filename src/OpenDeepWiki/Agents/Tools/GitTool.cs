@@ -77,15 +77,17 @@ public class GitTool
     /// </summary>
     /// <param name="glob">Glob pattern (e.g., "*.cs", "**/*.json", "src/**/*.ts")</param>
     /// <returns>Enumerable of matching file paths (full paths)</returns>
-    private IEnumerable<string> EnumerateFilesWithGlob(string? glob)
+    private IEnumerable<string> EnumerateFilesWithGlob(string? glob, CancellationToken cancellationToken = default,
+        bool applyIgnoreRules = true)
     {
         if (string.IsNullOrWhiteSpace(glob))
         {
             // No pattern - return all files (filtered by gitignore)
             foreach (var file in Directory.EnumerateFiles(_workingDirectory, "*", SearchOption.AllDirectories))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var relativePath = GetRelativePath(file);
-                if (!IsIgnoredByGitIgnore(relativePath))
+                if (!applyIgnoreRules || !IsIgnoredByGitIgnore(relativePath))
                 {
                     yield return file;
                 }
@@ -97,10 +99,36 @@ public class GitTool
         // Convert glob to regex pattern
         var globRegex = GlobToRegex(glob);
 
-        foreach (var file in Directory.EnumerateFiles(_workingDirectory, "*", SearchOption.AllDirectories))
+        // A scoped glob must not repeatedly walk every unrelated module in a large repository.
+        var normalizedGlob = glob.Replace('\\', '/');
+        var wildcard = normalizedGlob.IndexOfAny(['*', '?']);
+        var literal = wildcard < 0 ? normalizedGlob : normalizedGlob[..wildcard];
+        var slash = literal.LastIndexOf('/');
+        var searchRoot = _workingDirectory;
+        if (slash >= 0)
         {
+            var candidate = Path.GetFullPath(Path.Combine(_workingDirectory, literal[..slash]));
+            var rootPrefix = Path.TrimEndingDirectorySeparator(_workingDirectory) + Path.DirectorySeparatorChar;
+            // Resolve actual directory names so returned paths keep their original casing on Windows too.
+            if (candidate.StartsWith(rootPrefix, StringComparison.Ordinal) && Directory.Exists(candidate))
+            {
+                var resolved = _workingDirectory;
+                foreach (var part in Path.GetRelativePath(_workingDirectory, candidate).Split(Path.DirectorySeparatorChar))
+                {
+                    var match = Directory.EnumerateDirectories(resolved)
+                        .FirstOrDefault(path => string.Equals(Path.GetFileName(path), part, StringComparison.Ordinal));
+                    if (match is null) { resolved = _workingDirectory; break; }
+                    resolved = match;
+                }
+                searchRoot = resolved;
+            }
+        }
+
+        foreach (var file in Directory.EnumerateFiles(searchRoot, "*", SearchOption.AllDirectories))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var relativePath = GetRelativePath(file);
-            if (!IsIgnoredByGitIgnore(relativePath) && globRegex.IsMatch(relativePath))
+            if (globRegex.IsMatch(relativePath) && (!applyIgnoreRules || !IsIgnoredByGitIgnore(relativePath)))
             {
                 yield return file;
             }
@@ -323,7 +351,7 @@ Pattern Examples:
         {
             try
             {
-                var files = EnumerateFilesWithGlob(glob)
+                var files = EnumerateFilesWithGlob(glob, cancellationToken)
                     .Where(f => !RepositoryFileFilter.IsBinaryFile(f) && !IsHiddenPath(f));
 
                 Parallel.ForEach(files, new ParallelOptions
@@ -499,10 +527,11 @@ Glob Examples:
     {
         return await Task.Run(() =>
         {
-            return EnumerateFilesWithGlob(glob)
+            return EnumerateFilesWithGlob(glob, cancellationToken, applyIgnoreRules: false)
                 .Where(f => !IsHiddenPath(f))
                 .Select(GetRelativePath)
                 .OrderBy(f => f)
+                .Where(path => !IsIgnoredByGitIgnore(path))
                 .Take(maxResults)
                 .ToArray();
         }, cancellationToken);
