@@ -76,6 +76,13 @@
       - WIKI_LANGUAGES=${WIKI_LANGUAGES:-en,zh,zh-tw,ja,ko,es,fr,de,pt-br,pl,ru,ar}
     volumes:
       - ./data:/data
+      - epm-wiki-workspace:/data/easeus/winEPM
+      - type: bind
+        source: D:/GitHub
+        target: /git
+        read_only: true
+        bind:
+          create_host_path: false
       - /home/zhangruibo:/host/home/zhangruibo:ro
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
 
@@ -102,3 +109,8 @@
     restart: unless-stopped
     environment:
       - NODE_ENV=production
+
+volumes:
+  epm-wiki-workspace:
+    name: opendeepwiki-epm-wiki-workspace
+    external: true
