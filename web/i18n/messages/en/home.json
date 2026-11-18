@@ -197,6 +197,8 @@
         "resume": "Resume",
         "stop": "Stop",
         "restart": "Restart",
+        "queued": "Queued for generation",
+        "generating": "Generating docs",
         "pauseSuccess": "Generation paused",
         "resumeSuccess": "Generation resumed",
         "stopSuccess": "Generation stopped",

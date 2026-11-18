@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -33,6 +33,8 @@ import {
 } from "@/lib/repository-api";
 import { ApiError } from "@/lib/api-client";
 import { buildRepoDocPath } from "@/lib/repo-route";
+import { RepositoryRestartButton } from "./repository-restart-button";
+import { canRestartRepository, visibleControlActions, type ControlAction } from "@/lib/repository-controls";
 import type { ProcessingStep, RepositoryStatus } from "@/types/repository";
 
 interface RepositoryProcessingStatusProps {
@@ -42,22 +44,10 @@ interface RepositoryProcessingStatusProps {
   canControl?: boolean;
 }
 
-type ControlAction = "pause" | "resume" | "stop" | "restart";
-
-const controlActionMatrix: Record<RepositoryStatus, ControlAction[]> = {
-  Pending: ["pause", "stop", "restart"],
-  Processing: ["pause", "stop", "restart"],
-  Paused: ["resume", "stop", "restart"],
-  Stopped: ["restart"],
-  Failed: ["restart"],
-  Completed: ["restart"],
-};
-
-const controlActionIcons: Record<ControlAction, typeof Loader2> = {
+const controlActionIcons = {
   pause: Pause,
   resume: Play,
   stop: Square,
-  restart: RefreshCw,
 };
 
 const controlActionFallbacks: Record<ControlAction, string> = {
@@ -172,6 +162,10 @@ export function RepositoryProcessingStatus({
   );
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [activeAction, setActiveAction] = useState<ControlAction | null>(null);
+  const [statusConfirmed, setStatusConfirmed] = useState(false);
+  const restartAllowed = statusConfirmed && canRestartRepository(status);
+  const controlInFlight = useRef(false);
+  const statusRequestVersion = useRef(0);
 
   const text = useCallback(
     (key: string, fallback: string) => {
@@ -182,12 +176,13 @@ export function RepositoryProcessingStatus({
   );
 
   const pollStatusAndLogs = useCallback(async () => {
+    const version = ++statusRequestVersion.current;
     try {
-      const statusResponse = await fetchRepoStatus(owner, repo);
-      setStatus(statusResponse.statusName);
-      setLastUpdated(new Date());
-
       const logsResponse = await fetchProcessingLogs(owner, repo, undefined, 500);
+      if (version !== statusRequestVersion.current) return;
+      setStatus(logsResponse.statusName);
+      setStatusConfirmed(true);
+      setLastUpdated(new Date());
       setTotalDocuments(logsResponse.totalDocuments);
       setCompletedDocuments(logsResponse.completedDocuments);
       if (logsResponse.startedAt) {
@@ -202,20 +197,18 @@ export function RepositoryProcessingStatus({
       }
       setCurrentStep(logsResponse.currentStepName);
 
-      if (statusResponse.statusName === "Completed" && statusResponse.defaultSlug) {
+      if (logsResponse.statusName === "Completed") {
+        const { defaultSlug } = await fetchRepoStatus(owner, repo);
+        if (version !== statusRequestVersion.current || !defaultSlug) return;
         setIsPolling(false);
         setCurrentStep("Complete");
         setTimeout(() => {
-          window.location.href = buildRepoDocPath(owner, repo, statusResponse.defaultSlug);
+          if (version === statusRequestVersion.current) {
+            window.location.href = buildRepoDocPath(owner, repo, defaultSlug);
+          }
         }, 2000);
-      }
-
-      if (statusResponse.statusName === "Failed") {
-        setIsPolling(false);
-      }
-
-      if (statusResponse.statusName === "Paused" || statusResponse.statusName === "Stopped") {
-        setIsPolling(false);
+      } else {
+        setIsPolling(logsResponse.statusName === "Pending" || logsResponse.statusName === "Processing");
       }
     } catch (error) {
       console.error("Failed to poll status:", error);
@@ -223,28 +216,9 @@ export function RepositoryProcessingStatus({
   }, [owner, repo]);
 
   useEffect(() => {
-    const loadInitialLogs = async () => {
-      try {
-        const logsResponse = await fetchProcessingLogs(owner, repo, undefined, 500);
-        setCurrentStep(logsResponse.currentStepName);
-        setTotalDocuments(logsResponse.totalDocuments);
-        setCompletedDocuments(logsResponse.completedDocuments);
-        if (logsResponse.startedAt) {
-          // 确保正确解析 UTC 时间，后端存储的是 UTC 时间
-          const startedAtStr = logsResponse.startedAt;
-          if (startedAtStr.endsWith('Z') || startedAtStr.includes('+00:00')) {
-            setStartedAt(new Date(startedAtStr));
-          } else {
-            // 如果没有时区标记，假设是 UTC 时间
-            setStartedAt(new Date(startedAtStr + 'Z'));
-          }
-        }
-      } catch (error) {
-        console.error("Failed to load initial logs:", error);
-      }
-    };
-    loadInitialLogs();
-  }, [owner, repo]);
+    void pollStatusAndLogs();
+    return () => { ++statusRequestVersion.current; };
+  }, [pollStatusAndLogs]);
 
   useEffect(() => {
     if (!isPolling) return;
@@ -307,6 +281,9 @@ export function RepositoryProcessingStatus({
   };
 
   const handleControlAction = async (action: ControlAction) => {
+    if (controlInFlight.current || (action === "restart" && !restartAllowed)) return;
+    controlInFlight.current = true;
+    ++statusRequestVersion.current;
     setActiveAction(action);
     try {
       await controlActionHandlers[action](owner, repo);
@@ -337,6 +314,7 @@ export function RepositoryProcessingStatus({
       toast.error(getControlErrorMessage(error));
       await pollStatusAndLogs();
     } finally {
+      controlInFlight.current = false;
       setActiveAction(null);
     }
   };
@@ -371,7 +349,7 @@ export function RepositoryProcessingStatus({
   );
   const statusLabel = text(`home.repository.status.${status.toLowerCase()}`, config.fallback);
   const isProcessing = status === "Processing" || status === "Pending";
-  const availableActions = canControl ? controlActionMatrix[status] : [];
+  const availableActions = canControl ? visibleControlActions[status] : [];
 
   const formatTime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -572,9 +550,15 @@ export function RepositoryProcessingStatus({
             {canControl && availableActions.length > 0 && (
               <div className="mt-6 flex flex-wrap gap-3">
                 {availableActions.map((action) => {
+                  if (action === "restart") {
+                    return (
+                      <RepositoryRestartButton key={action} size="lg" className="flex-1"
+                        status={status} activeAction={activeAction} disabled={!statusConfirmed}
+                        onClick={() => handleControlAction(action)} />
+                    );
+                  }
                   const ActionIcon = controlActionIcons[action];
                   const isActionLoading = activeAction === action;
-                  const isPrimaryAction = action === "restart";
 
                   return (
                     <button
@@ -582,11 +566,7 @@ export function RepositoryProcessingStatus({
                       type="button"
                       onClick={() => handleControlAction(action)}
                       disabled={activeAction !== null}
-                      className={`inline-flex h-10 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                        isPrimaryAction
-                          ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                          : "border border-border bg-background text-foreground hover:border-foreground/30"
-                      }`}
+                      className="inline-flex h-10 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:border-foreground/30 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {isActionLoading ? (
                         <Loader2 className="h-4 w-4 animate-spin" />

@@ -8,6 +8,8 @@ namespace OpenDeepWiki.Entities;
 /// </summary>
 public class BranchLanguage : AggregateRoot<string>
 {
+    public string? DeepScanProgressJson { get; set; }
+
     /// <summary>
     /// 仓库分支ID
     /// </summary>

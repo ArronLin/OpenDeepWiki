@@ -589,7 +589,6 @@ public class RepositoryProcessingWorker(
             // Update branch with new commit ID after successful processing
             branch.LastCommitId = workspace.CommitId;
             branch.LastProcessedAt = DateTime.UtcNow;
-            context.RepositoryBranches.Update(branch);
             await context.SaveChangesAsync(stoppingToken);
 
             branchStopwatch.Stop();

@@ -459,6 +459,16 @@ export interface AdminBranchGenerationTask {
 }
 
 export interface AdminRepositoryScanPlan {
+  latestEvaluation?: Pick<AdminBranchGenerationTask, "taskId" | "status" | "errorMessage"> | null;
+  deepPlan?: {
+    id: string; commit: string; source: string; model?: string; reason?: string; evaluatedAt: string;
+    planningTokens: number; excluded: Record<string, number>;
+    modules: { root: string; title: string; files: string[]; requiredFiles: string[]; questions: string[]; dependencies: string[]; topics: string[] }[];
+  };
+  deepProgress?: { language: string; progress?: {
+    planId: string; commit: string; startedAt: string; finishedAt?: string;
+    batches: { module: string; page: string; reads: { path: string }[]; gaps: string[]; tokens: number; citedFiles?: string[] }[];
+  } }[];
   source: string;
   mode: "Auto" | "Manual";
   directoryTreeDepth: number;
@@ -541,8 +551,12 @@ export async function cancelBranchGenerationTask(taskId: string): Promise<AdminB
   return fetchWithAuth(url, { method: "POST" });
 }
 
-export async function getRepositoryScanPlan(id: string): Promise<AdminRepositoryScanPlan> {
-  const url = buildApiUrl(`/api/admin/repositories/${id}/scan-plan`);
+export async function pauseBranchGenerationTask(taskId: string): Promise<AdminBranchGenerationTask> {
+  return fetchWithAuth(buildApiUrl(`/api/v1/branch-generation-tasks/${encodeURIComponent(taskId)}/pause`), { method: "POST" });
+}
+
+export async function getRepositoryScanPlan(id: string, branchId?: string): Promise<AdminRepositoryScanPlan> {
+  const url = buildApiUrl(`/api/admin/repositories/${id}/scan-plan` + (branchId ? `?branchId=${encodeURIComponent(branchId)}` : ""));
   const result = await fetchWithAuth(url);
   return result.data;
 }
@@ -565,10 +579,14 @@ export async function updateRepositoryScanPlan(
   return result.data;
 }
 
-export async function reevaluateRepositoryScanPlan(id: string): Promise<AdminRepositoryScanPlanOperationResult> {
-  const url = buildApiUrl(`/api/admin/repositories/${id}/scan-plan/reevaluate`);
+export async function reevaluateRepositoryScanPlan(id: string, branchId: string): Promise<{ success: boolean; taskId: string }> {
+  const url = buildApiUrl(`/api/admin/repositories/${id}/scan-plan/reevaluate?branchId=${encodeURIComponent(branchId)}`);
   const result = await fetchWithAuth(url, { method: "POST" });
   return result; // return the full result containing success, message, and data
+}
+
+export async function getScanPlanTask(taskId: string): Promise<AdminBranchGenerationTask> {
+  return fetchWithAuth(buildApiUrl(`/api/v1/branch-generation-tasks/${encodeURIComponent(taskId)}`));
 }
 
 export async function getRepositoryGraphifyArtifacts(id: string): Promise<AdminGraphifyArtifact[]> {

@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { ScanPlanEvaluationStatus, ScanPlanSummary } from "@/components/repo/scan-plan-summary";
+import { RepositoryRestartButton } from "@/components/repo/repository-restart-button";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -48,6 +50,7 @@ import {
   AdminRepository,
   AdminRepositoryManagement,
   cancelBranchGenerationTask,
+  pauseBranchGenerationTask,
   enqueueBranchFullGeneration,
   generateRepositoryGraphify,
   getIncrementalUpdateTask,
@@ -66,7 +69,8 @@ import {
   AdminRepositoryScanPlan,
   UpdateRepositoryScanPlanPayload,
 } from "@/lib/admin-api";
-import { getRepositorySourceTypeLabelKey, isGitRepositorySource } from "@/lib/repository-source";
+import { getRepositorySourceTypeLabelKey, isGitRepositorySource, normalizeRepositorySourceType } from "@/lib/repository-source";
+import { canRestartRepository, visibleControlActions, type ControlAction } from "@/lib/repository-controls";
 import {
   fetchProcessingLogs,
   fetchRepoDoc,
@@ -76,7 +80,7 @@ import {
   restartRepository,
   stopRepository,
 } from "@/lib/repository-api";
-import type { ProcessingLogResponse, RepoDocResponse, RepositoryStatus, RepoTreeNode } from "@/types/repository";
+import type { ProcessingLogResponse, RepoDocResponse, RepoTreeNode } from "@/types/repository";
 import { AdminBreadcrumb } from "@/components/admin/admin-breadcrumb";
 import { StatusBadge, type StatusTone } from "@/components/admin/status-badge";
 import {
@@ -103,22 +107,10 @@ function taskStatusTone(status: string): StatusTone {
   return TASK_STATUS_TONE[normalizeTaskStatus(status)] ?? "neutral";
 }
 
-type ControlAction = "pause" | "resume" | "stop" | "restart";
-
-const controlActionMatrix: Record<RepositoryStatus, ControlAction[]> = {
-  Pending: ["pause", "stop", "restart"],
-  Processing: ["pause", "stop", "restart"],
-  Paused: ["resume", "stop", "restart"],
-  Stopped: ["restart"],
-  Failed: ["restart"],
-  Completed: ["restart"],
-};
-
-const controlActionIcons: Record<ControlAction, typeof Loader2> = {
+const controlActionIcons = {
   pause: Pause,
   resume: Play,
   stop: Square,
-  restart: RefreshCw,
 };
 
 const controlActionHandlers: Record<
@@ -163,7 +155,8 @@ export default function AdminRepositoryManagementPage() {
   const [docDraft, setDocDraft] = useState("");
   const [savingDoc, setSavingDoc] = useState(false);
 
-  const [scanPlan, setScanPlan] = useState<AdminRepositoryScanPlan | null>(null);
+  const [scanPlanResult, setScanPlanResult] = useState<{ scope: string; plan: AdminRepositoryScanPlan } | null>(null);
+  const [scanPlanErrorScope, setScanPlanErrorScope] = useState("");
   const [scanMode, setScanMode] = useState<"Auto" | "Manual">("Auto");
   const [directoryTreeDepthInput, setDirectoryTreeDepthInput] = useState<string>("");
   const [fileListDepthInput, setFileListDepthInput] = useState<string>("");
@@ -172,9 +165,35 @@ export default function AdminRepositoryManagementPage() {
   const [maxTotalFilesInput, setMaxTotalFilesInput] = useState<string>("");
   const [extraExcludedDirsInput, setExtraExcludedDirsInput] = useState<string>("");
   const [savingScanPlan, setSavingScanPlan] = useState(false);
-  const [reevaluatingScanPlan, setReevaluatingScanPlan] = useState(false);
+  const [submittingEvaluation, setSubmittingEvaluation] = useState(false);
+  const [evaluationBaseline, setEvaluationBaseline] = useState<{
+    taskId: string;
+    plan: AdminRepositoryScanPlan["deepPlan"];
+  } | null>(null);
 
   const [selectedBranchId, setSelectedBranchId] = useState("");
+  const scanPlanScope = `${repositoryId}:${selectedBranchId}`;
+  const scanPlanScopeRef = useRef("");
+  const scanPlanWriteVersion = useRef(0);
+  const scanPlan = scanPlanResult?.scope === scanPlanScope ? scanPlanResult.plan : null;
+  const effectiveScanMode = scanPlan?.deepPlan ? "Auto" : scanPlan?.mode;
+  const evaluation = scanPlan?.latestEvaluation;
+  const evaluationActive = evaluation?.status === "Pending" || evaluation?.status === "Processing";
+  const reevaluatingScanPlan = submittingEvaluation || evaluationActive;
+  const scanPlanDiff = useMemo(() => {
+    if (!evaluationBaseline || evaluation?.taskId !== evaluationBaseline.taskId ||
+        evaluation.status !== "Completed" || !scanPlan?.deepPlan) return undefined;
+    const previous = new Map(evaluationBaseline.plan?.modules.map((module) => [module.root, module]));
+    const next = new Map(scanPlan.deepPlan.modules.map((module) => [module.root, module]));
+    const added = [...next.keys()].filter((root) => !previous.has(root));
+    const removed = [...previous.keys()].filter((root) => !next.has(root));
+    const changed = [...next.keys()].filter((root) =>
+      previous.has(root) && JSON.stringify(previous.get(root)) !== JSON.stringify(next.get(root)));
+    const roots = [...added, ...removed, ...changed];
+    return t("admin.repositories.management.scanPlan.moduleChanges", {
+      added: added.length, removed: removed.length, changed: changed.length,
+    }) + (roots.length ? ` · ${roots.join(", ")}` : "");
+  }, [evaluation, evaluationBaseline, scanPlan?.deepPlan, t]);
   const [selectedLanguage, setSelectedLanguage] = useState("");
   const [selectedDocSlug, setSelectedDocSlug] = useState("");
 
@@ -188,6 +207,8 @@ export default function AdminRepositoryManagementPage() {
   const [triggeringIncremental, setTriggeringIncremental] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [activeControlAction, setActiveControlAction] = useState<ControlAction | null>(null);
+  const controlInFlight = useRef(false);
+  const baseRequestVersion = useRef(0);
   const [taskRefreshingId, setTaskRefreshingId] = useState<string | null>(null);
   const [taskRetryingId, setTaskRetryingId] = useState<string | null>(null);
   const [branchTaskActionId, setBranchTaskActionId] = useState<string | null>(null);
@@ -264,7 +285,7 @@ export default function AdminRepositoryManagementPage() {
 
   const isScanPlanDirty = useMemo(() => {
     if (!scanPlan) return false;
-    if (scanMode !== scanPlan.mode) return true;
+    if (scanMode !== effectiveScanMode) return true;
     if (scanMode === "Manual") {
       const extraExcludedStr = (scanPlan.extraExcludedDirs ?? []).join(",");
       const currentExtraExcludedStr = extraExcludedDirsInput
@@ -286,6 +307,7 @@ export default function AdminRepositoryManagementPage() {
     return false;
   }, [
     scanPlan,
+    effectiveScanMode,
     scanMode,
     directoryTreeDepthInput,
     fileListDepthInput,
@@ -381,6 +403,12 @@ export default function AdminRepositoryManagementPage() {
   const supportsGitOperations = repository
     ? isGitRepositorySource(repository.sourceType, repository.sourceTypeName)
     : false;
+  const supportsScanPlan = repository !== null &&
+    normalizeRepositorySourceType(repository.sourceType, repository.sourceTypeName) !== "Documentation";
+  const waitingForAutoPlan = !scanPlan?.deepPlan && scanMode === "Auto" &&
+    (repositoryStatusKey === "Pending" || repositoryStatusKey === "Processing");
+  const showLegacyScanPlan = scanPlan &&
+    ((!scanPlan.deepPlan && !waitingForAutoPlan) || (scanMode === "Manual" && isScanPlanDirty));
 
   const processingFlow = useMemo(() => {
     const steps = [
@@ -481,20 +509,20 @@ export default function AdminRepositoryManagementPage() {
       return;
     }
 
+    const version = ++baseRequestVersion.current;
     if (!options?.silent) {
       setPageLoading(true);
     }
     try {
-      const [repoData, managementData, graphifyData, scanPlanData] = await Promise.all([
+      const [repoData, managementData, graphifyData] = await Promise.all([
         getRepository(repositoryId),
         getRepositoryManagement(repositoryId),
         getRepositoryGraphifyArtifacts(repositoryId),
-        getRepositoryScanPlan(repositoryId),
       ]);
+      if (version !== baseRequestVersion.current) return;
       setRepository(repoData);
       setManagement(managementData);
       setGraphifyArtifacts(graphifyData);
-      setScanPlan(scanPlanData);
     } catch (error) {
       console.error("Failed to load repository management data:", error);
       if (!options?.silent) {
@@ -713,23 +741,44 @@ export default function AdminRepositoryManagementPage() {
   const appliedScanPlanRef = useRef("");
 
   useEffect(() => {
+    scanPlanScopeRef.current = scanPlanScope;
+    if (!supportsScanPlan || !repositoryId || !selectedBranchId) return;
+    let active = true;
+    const writeVersion = scanPlanWriteVersion.current;
+    getRepositoryScanPlan(repositoryId, selectedBranchId)
+      .then((plan) => {
+        if (!active || writeVersion !== scanPlanWriteVersion.current) return;
+        setScanPlanResult({ scope: scanPlanScope, plan });
+        setScanPlanErrorScope("");
+      })
+      .catch((error) => {
+        if (!active || writeVersion !== scanPlanWriteVersion.current) return;
+        console.error("Failed to load branch scan plan:", error);
+        setScanPlanErrorScope(scanPlanScope);
+      });
+    return () => { active = false; };
+  }, [repositoryId, selectedBranchId, scanPlanScope, supportsScanPlan, management]);
+
+  useEffect(() => {
     if (!scanPlan) {
       return;
     }
-    // 轮询会周期刷新出内容相同的新对象，避免因此覆盖表单中未保存的输入
-    const fingerprint = JSON.stringify(scanPlan);
+    // Refresh the form when its values change, independently of generation progress.
+    const fingerprint = JSON.stringify([scanPlanScope, effectiveScanMode, scanPlan.directoryTreeDepth,
+      scanPlan.fileListDepth, scanPlan.maxTreeNodes, scanPlan.maxFilesPerDirectory, scanPlan.maxTotalFiles,
+      scanPlan.extraExcludedDirs]);
     if (fingerprint === appliedScanPlanRef.current) {
       return;
     }
     appliedScanPlanRef.current = fingerprint;
-    setScanMode(scanPlan.mode);
+    setScanMode(effectiveScanMode ?? "Auto");
     setDirectoryTreeDepthInput(scanPlan.directoryTreeDepth?.toString() ?? "");
     setFileListDepthInput(scanPlan.fileListDepth?.toString() ?? "");
     setMaxTreeNodesInput(scanPlan.maxTreeNodes?.toString() ?? "");
     setMaxFilesPerDirectoryInput(scanPlan.maxFilesPerDirectory?.toString() ?? "");
     setMaxTotalFilesInput(scanPlan.maxTotalFiles?.toString() ?? "");
     setExtraExcludedDirsInput((scanPlan.extraExcludedDirs ?? []).join(", "));
-  }, [scanPlan]);
+  }, [scanPlan, scanPlanScope, effectiveScanMode]);
 
   useEffect(() => {
     if (!isGraphifyArtifactActive || !repositoryId) {
@@ -752,7 +801,7 @@ export default function AdminRepositoryManagementPage() {
   }, [isGraphifyArtifactActive, repositoryId, loadLogs]);
 
   useEffect(() => {
-    if (branchGenerationSummary.active === 0) {
+    if (branchGenerationSummary.active === 0 && !evaluationActive) {
       return;
     }
 
@@ -768,7 +817,7 @@ export default function AdminRepositoryManagementPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [branchGenerationSummary.active, loadBaseData, loadLogs]);
+  }, [branchGenerationSummary.active, evaluationActive, loadBaseData, loadLogs]);
 
   useEffect(() => {
     if (repositoryStatusKey !== "Pending" && repositoryStatusKey !== "Processing") {
@@ -878,15 +927,21 @@ export default function AdminRepositoryManagementPage() {
   };
 
   const handleRepositoryControl = async (action: ControlAction) => {
-    if (!repository) return;
+    if (!repository || controlInFlight.current || (action === "restart" && !canRestartRepository(repositoryStatusKey))) return;
     if (action === "restart" && !window.confirm(t("admin.repositories.management.confirmRestart"))) {
       return;
     }
 
+    controlInFlight.current = true;
     setActiveControlAction(action);
     try {
       const result = await controlActionHandlers[action](repository.orgName, repository.repoName);
       if (result.success) {
+        if (action === "restart") {
+          // The server has already requeued this repository. Discard reads started before the restart.
+          ++baseRequestVersion.current;
+          setRepository(current => current?.id === repository.id ? { ...current, status: 0, statusText: "Pending" } : current);
+        }
         toast.success(t(`admin.repositories.management.toasts.${action}Success`));
       } else {
         toast.error(result.errorMessage || t("admin.repositories.management.toasts.controlFailed"));
@@ -895,9 +950,13 @@ export default function AdminRepositoryManagementPage() {
       console.error("Failed to control repository processing:", error);
       toast.error(error instanceof Error ? error.message : t("admin.repositories.management.toasts.controlFailed"));
     } finally {
-      setActiveControlAction(null);
-      await loadBaseData();
-      await loadLogs();
+      try {
+        await loadBaseData({ silent: true });
+      } finally {
+        controlInFlight.current = false;
+        setActiveControlAction(null);
+      }
+      await loadLogs({ silent: true });
     }
   };
 
@@ -938,10 +997,10 @@ export default function AdminRepositoryManagementPage() {
     }
   };
 
-  const handleCancelBranchGeneration = async (taskId: string) => {
+  const handleCancelBranchGeneration = async (taskId: string, pause = false) => {
     setBranchTaskActionId(taskId);
     try {
-      const task = await cancelBranchGenerationTask(taskId);
+      const task = await (pause ? pauseBranchGenerationTask(taskId) : cancelBranchGenerationTask(taskId));
       updateBranchTaskInState(task);
       setLogBranchFilter(task.branchId);
       setLogTaskFilter(task.taskId);
@@ -1114,7 +1173,7 @@ export default function AdminRepositoryManagementPage() {
   };
 
   const handleSaveScanPlan = async () => {
-    if (!repositoryId) return;
+    if (!repositoryId || !scanPlan) return;
 
     const payload: UpdateRepositoryScanPlanPayload = {
       mode: scanMode,
@@ -1157,7 +1216,12 @@ export default function AdminRepositoryManagementPage() {
     setSavingScanPlan(true);
     try {
       const updatedPlan = await updateRepositoryScanPlan(repositoryId, payload);
-      setScanPlan(updatedPlan);
+      scanPlanWriteVersion.current += 1;
+      if (scanPlanScopeRef.current === scanPlanScope) {
+        setScanPlanResult({ scope: scanPlanScope, plan: updatedPlan });
+        setScanPlanErrorScope("");
+      }
+      void loadBaseData({ silent: true });
       toast.success(t("admin.repositories.management.scanPlan.saveSuccess"));
     } catch (error) {
       console.error("Failed to save scan plan:", error);
@@ -1168,25 +1232,25 @@ export default function AdminRepositoryManagementPage() {
   };
 
   const handleReevaluateScanPlan = async () => {
-    if (!repositoryId) return;
+    if (!repositoryId || !selectedBranchId || !scanPlan || reevaluatingScanPlan) return;
 
-    setReevaluatingScanPlan(true);
+    setSubmittingEvaluation(true);
     try {
-      const result = await reevaluateRepositoryScanPlan(repositoryId);
-      if (result.success) {
-        setScanPlan(result.data);
-        toast.success(result.message || t("admin.repositories.management.scanPlan.reevaluateSuccess"));
-      } else {
-        toast.error(result.message || t("admin.repositories.management.toasts.reevaluateScanPlanFailed"));
-        if (result.data) {
-          setScanPlan(result.data);
-        }
+      const { taskId } = await reevaluateRepositoryScanPlan(repositoryId, selectedBranchId);
+      setEvaluationBaseline({ taskId, plan: scanPlan.deepPlan });
+      if (scanPlanScopeRef.current === scanPlanScope) {
+        scanPlanWriteVersion.current += 1;
+        setScanPlanResult({ scope: scanPlanScope, plan: {
+          ...scanPlan, latestEvaluation: { taskId, status: "Pending" },
+        } });
+        setScanPlanErrorScope("");
       }
+      void loadBaseData({ silent: true });
     } catch (error) {
       console.error("Failed to reevaluate scan plan:", error);
-      toast.error(t("admin.repositories.management.toasts.reevaluateScanPlanFailed"));
+      toast.error(error instanceof Error ? error.message : t("admin.repositories.management.toasts.reevaluateScanPlanFailed"));
     } finally {
-      setReevaluatingScanPlan(false);
+      setSubmittingEvaluation(false);
     }
   };
 
@@ -1306,7 +1370,7 @@ export default function AdminRepositoryManagementPage() {
   }
 
   const repositoryStatusSource = repositoryStatusKey ?? repository.statusText;
-  const availableControlActions = repositoryStatusKey ? controlActionMatrix[repositoryStatusKey] : [];
+  const availableControlActions = repositoryStatusKey ? visibleControlActions[repositoryStatusKey] : [];
 
   return (
     <div className="space-y-5">
@@ -1363,12 +1427,19 @@ export default function AdminRepositoryManagementPage() {
               {t("admin.repositories.management.generateGraphify")}
             </Button>
             {availableControlActions.map((action) => {
+              if (action === "restart") {
+                return (
+                  <RepositoryRestartButton key={action} size="sm" variant="destructive"
+                    status={repositoryStatusKey} activeAction={activeControlAction}
+                    onClick={() => handleRepositoryControl(action)} />
+                );
+              }
               const ControlIcon = controlActionIcons[action];
               const isControlLoading = activeControlAction === action;
               return (
                 <Button
                   key={action}
-                  variant={action === "restart" ? "destructive" : "outline"}
+                  variant="outline"
                   size="sm"
                   onClick={() => handleRepositoryControl(action)}
                   disabled={activeControlAction !== null}
@@ -1471,21 +1542,22 @@ export default function AdminRepositoryManagementPage() {
         </div>
       </Card>
 
-      <Card className="p-4 transition-all duration-300 hover:shadow-sm">
+      {supportsScanPlan && <Card className="p-4 transition-all duration-300 hover:shadow-sm">
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
             <div className="space-y-1">
               <h2 className="text-lg font-semibold flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-primary animate-pulse" />
+                <Sparkles className="h-5 w-5 text-primary" aria-hidden="true" />
                 {t("admin.repositories.management.scanPlan.title")}
               </h2>
               <p className="text-xs text-muted-foreground">
-                {t("admin.repositories.management.scanPlan.hint")}
+                {t("admin.repositories.management.scanPlan.branchScopeHint")}
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              <Select value={scanMode} onValueChange={(val) => setScanMode(val as "Auto" | "Manual")}>
-                <SelectTrigger className="w-[180px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={scanMode} onValueChange={(val) => setScanMode(val as "Auto" | "Manual")}
+                disabled={!scanPlan || savingScanPlan || reevaluatingScanPlan}>
+                <SelectTrigger className="w-[180px]" aria-label={t("admin.repositories.management.scanPlan.mode")}>
                   <SelectValue placeholder={t("admin.repositories.management.scanPlan.mode")} />
                 </SelectTrigger>
                 <SelectContent>
@@ -1493,36 +1565,59 @@ export default function AdminRepositoryManagementPage() {
                   <SelectItem value="Manual">{t("admin.repositories.management.scanPlan.modeManual")}</SelectItem>
                 </SelectContent>
               </Select>
-              {scanMode === "Auto" ? (
-                <>
-                  {isScanPlanDirty && (
-                    <Button onClick={handleSaveScanPlan} disabled={savingScanPlan}>
-                      {savingScanPlan ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                      {t("admin.repositories.management.scanPlan.save")}
-                    </Button>
-                  )}
-                  <Button variant="outline" onClick={handleReevaluateScanPlan} disabled={reevaluatingScanPlan || isScanPlanDirty}>
-                    {reevaluatingScanPlan ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-                    {t("admin.repositories.management.scanPlan.reevaluate")}
-                  </Button>
-                </>
-              ) : (
-                <Button onClick={handleSaveScanPlan} disabled={savingScanPlan || !isScanPlanDirty}>
+              {isScanPlanDirty && (
+                <Button onClick={handleSaveScanPlan} disabled={savingScanPlan}>
                   {savingScanPlan ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                   {t("admin.repositories.management.scanPlan.save")}
                 </Button>
               )}
+              <Button variant="outline" onClick={handleReevaluateScanPlan}
+                disabled={!scanPlan || savingScanPlan || reevaluatingScanPlan || isScanPlanDirty}>
+                {reevaluatingScanPlan ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                {t(reevaluatingScanPlan
+                  ? "admin.repositories.management.scanPlan.reevaluating"
+                  : "admin.repositories.management.scanPlan.reevaluate")}
+              </Button>
             </div>
           </div>
 
+          {evaluation && selectedBranch && (
+            <ScanPlanEvaluationStatus branch={selectedBranch.name} evaluation={evaluation} />
+          )}
+          {scanPlan?.deepPlan && selectedBranch && (
+            <ScanPlanSummary
+              key={scanPlan.deepPlan.id}
+              branch={selectedBranch.name}
+              plan={scanPlan.deepPlan}
+              progress={scanPlan.deepProgress}
+              changes={scanPlanDiff}
+            />
+          )}
+
+          {!scanPlan?.deepPlan && (waitingForAutoPlan || !scanPlan) && (
+            <p role="status" className="rounded-lg border bg-muted/10 p-4 text-sm text-muted-foreground">
+              {t(scanPlanErrorScope === scanPlanScope
+                ? "admin.repositories.management.scanPlan.loadFailed"
+                : waitingForAutoPlan
+                  ? "admin.repositories.management.scanPlan.waitingForAutoPlan"
+                  : selectedBranchId
+                    ? "admin.repositories.management.scanPlan.loadingPlan"
+                    : "admin.repositories.management.scanPlan.noPlan")}
+            </p>
+          )}
+
+          {showLegacyScanPlan && (
           <div className="grid gap-6 md:grid-cols-2">
             {/* Display/Edit Scan plan parameters */}
             <div className="space-y-4 rounded-lg border bg-muted/10 p-4">
               <h3 className="text-sm font-semibold text-muted-foreground border-b pb-2">
                 {scanMode === "Manual"
                   ? t("admin.repositories.management.scanPlan.manualConfig")
-                  : t("admin.repositories.management.scanPlan.autoPlanTitle")}
+                  : t("admin.repositories.management.scanPlan.legacyPlanTitle")}
               </h3>
+              {scanMode === "Manual" && isScanPlanDirty && (
+                <p className="text-sm text-muted-foreground">{t("admin.repositories.management.scanPlan.manualScope")}</p>
+              )}
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
@@ -1641,8 +1736,9 @@ export default function AdminRepositoryManagementPage() {
               )}
             </div>
           </div>
+          )}
         </div>
-      </Card>
+      </Card>}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid w-full grid-cols-2 gap-2 md:grid-cols-4">
@@ -1681,8 +1777,8 @@ export default function AdminRepositoryManagementPage() {
               const isBranchActive = normalizedStatus === "pending" || normalizedStatus === "processing";
               const isBranchFailed = normalizedStatus === "failed";
               const isBranchCancelled = normalizedStatus === "cancelled";
-              const canRetryBranch = (isBranchFailed || isBranchCancelled) && Boolean(branch.lastGenerationTaskId);
-              const canCancelBranch = normalizedStatus === "pending" && Boolean(branch.lastGenerationTaskId);
+              const canRetryBranch = (isBranchFailed || isBranchCancelled || normalizedStatus === "paused") && Boolean(branch.lastGenerationTaskId);
+              const canCancelBranch = isBranchActive && Boolean(branch.lastGenerationTaskId);
               const actionBusy = branchTaskCreatingId === branch.id || branchTaskActionId === branch.lastGenerationTaskId;
               return (
                 <div
@@ -1767,7 +1863,11 @@ export default function AdminRepositoryManagementPage() {
                         disabled={actionBusy || !canCancelBranch}
                       >
                         {branchTaskActionId === branch.lastGenerationTaskId && canCancelBranch ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <X className="mr-2 h-4 w-4" />}
-                        Cancel pending
+                        {t("admin.repositories.management.scanPlan.cancelTask")}
+                      </Button>
+                      <Button size="sm" variant="outline" disabled={actionBusy || !canCancelBranch}
+                        onClick={() => branch.lastGenerationTaskId && handleCancelBranchGeneration(branch.lastGenerationTaskId, true)}>
+                        <Pause className="mr-2 h-4 w-4" />{t("admin.repositories.management.scanPlan.pauseTask")}
                       </Button>
                       <Button
                         size="sm"

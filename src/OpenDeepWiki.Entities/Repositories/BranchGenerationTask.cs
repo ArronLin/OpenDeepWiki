@@ -9,12 +9,14 @@ public enum BranchGenerationTaskStatus
     Processing = 1,
     Completed = 2,
     Failed = 3,
-    Cancelled = 4
+    Cancelled = 4,
+    Paused = 5
 }
 
 public enum BranchGenerationTaskMode
 {
-    Full = 0
+    Full = 0,
+    ScanPlan = 1
 }
 
 public class BranchGenerationTask : AggregateRoot<string>
@@ -30,6 +32,7 @@ public class BranchGenerationTask : AggregateRoot<string>
     public BranchGenerationTaskStatus Status { get; set; } = BranchGenerationTaskStatus.Pending;
 
     public BranchGenerationTaskMode Mode { get; set; } = BranchGenerationTaskMode.Full;
+    public BranchGenerationTaskStatus? RequestedStopStatus { get; set; }
 
     public int Priority { get; set; }
 

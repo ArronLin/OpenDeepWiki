@@ -1,0 +1,111 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Moq;
+using OpenDeepWiki.Agents;
+using OpenDeepWiki.EFCore;
+using OpenDeepWiki.Entities;
+using OpenDeepWiki.Services.AI;
+using OpenDeepWiki.Services.Repositories;
+using OpenDeepWiki.Services.Wiki;
+using OpenDeepWiki.Tests.Services.Chat;
+using Xunit;
+
+namespace OpenDeepWiki.Tests.Services.Repositories;
+
+public sealed class ScanModuleCheckpointTests
+{
+    private sealed class TestContext(DbContextOptions<TestContext> options) : MasterDbContext(options);
+
+    [Fact]
+    public async Task RetryUsesValidatedModulesAndGenerationReadsTheirVersionedEvidence()
+    {
+        var calls = new ConcurrentQueue<string>();
+        var failBeta = true;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var server = builder.Build();
+        server.MapPost("/v1/chat/completions", async (HttpContext request) =>
+        {
+            var body = await JsonDocument.ParseAsync(request.Request.Body);
+            var input = body.RootElement.GetProperty("messages").EnumerateArray().Last().GetProperty("content");
+            var text = input.ValueKind == JsonValueKind.String ? input.GetString() : input[0].GetProperty("text").GetString();
+            var payload = JsonDocument.Parse(text!).RootElement;
+            string reply;
+            if (payload.TryGetProperty("module", out var module))
+            {
+                calls.Enqueue(module.GetString()!);
+                reply = module.GetString() == "beta" && failBeta ? "{}" :
+                    """{"title":"module","requiredFileIds":[0,9999],"questions":["entry?"],"dependencies":[],"topics":[]}""";
+            }
+            else
+            {
+                var source = payload.GetProperty("sources")[0];
+                var path = source.GetProperty("evidence").GetProperty("path").GetString();
+                reply = JsonSerializer.Serialize(new { markdown = path + " " + source.GetProperty("content").GetString(), unansweredQuestions = Array.Empty<string>() });
+            }
+            var chunk = JsonSerializer.Serialize(new { id = "chatcmpl-test", created = 1, model = "test",
+                choices = new[] { new { index = 0, delta = new { role = "assistant", content = reply }, finish_reason = "stop" } } });
+            request.Response.ContentType = "text/event-stream";
+            await request.Response.WriteAsync($"data: {chunk}\n\ndata: [DONE]\n\n");
+        });
+        await server.StartAsync();
+
+        var root = Directory.CreateTempSubdirectory();
+        try
+        {
+            var options = new DbContextOptionsBuilder<TestContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+            using var context = new TestContext(options);
+            var branch = new RepositoryBranch { Id = "branch", RepositoryId = "repo", BranchName = "main" };
+            var language = new BranchLanguage { Id = "lang", RepositoryBranchId = branch.Id, LanguageCode = "en" };
+            context.AddRange(branch, language);
+            await context.SaveChangesAsync();
+            var factory = new Mock<IContextFactory>();
+            factory.Setup(f => f.CreateContext()).Returns(() => new TestContext(options));
+            var settings = new Mock<IOptionsMonitor<WikiGeneratorOptions>>();
+            settings.SetupGet(o => o.CurrentValue).Returns(new WikiGeneratorOptions { EnableAiScanProfile = true, ParallelCount = 1 });
+            var resolver = new Mock<IAiProviderResolver>();
+            var model = await TestAiProviderResolver.Instance.ResolveAsync(null, "test");
+            resolver.Setup(r => r.ResolveAsync(It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(model with { BaseUrl = server.Urls.Single() + "/v1" });
+            var scan = new DeepRepositoryScan(context, factory.Object, settings.Object, resolver.Object,
+                new AgentFactory(Options.Create(new AiRequestOptions())), NullLogger<DeepRepositoryScan>.Instance);
+            var workspace = new RepositoryWorkspace { WorkingDirectory = root.FullName, CommitId = "version-one" };
+            foreach (var name in new[] { "alpha", "beta" })
+            {
+                Directory.CreateDirectory(Path.Combine(root.FullName, name));
+                File.WriteAllText(Path.Combine(root.FullName, name, "main.cs"), "version-one-evidence");
+            }
+            await Assert.ThrowsAsync<InvalidOperationException>(() => scan.EvaluateAsync(workspace, branch, true, default));
+            Assert.Null(branch.DeepScanPlanJson);
+            Assert.Equal("alpha", (await context.ScanModuleCheckpoints.SingleAsync()).ModuleRoot);
+
+            failBeta = false;
+            calls.Clear();
+            var plan = await scan.EvaluateAsync(workspace, branch, true, default);
+            Assert.Equal(new[] { "beta" }, calls.ToArray());
+            Assert.Equal(1, plan.ReusedModules);
+            File.WriteAllText(Path.Combine(root.FullName, "alpha", "main.cs"), "different-worktree-content");
+            await scan.GenerateAsync(workspace, language, plan, default);
+            var docs = await context.DocFiles.ToListAsync();
+            Assert.Equal(2, docs.Count);
+            Assert.All(docs, doc => Assert.Contains("version-one-evidence", doc.Content));
+
+            workspace.CommitId = "version-two";
+            calls.Clear();
+            var changed = await scan.EvaluateAsync(workspace, branch, true, default);
+            Assert.Equal(0, changed.ReusedModules);
+            Assert.Equal(new[] { "alpha", "beta" }, calls.ToArray());
+        }
+        finally
+        {
+            await server.StopAsync();
+            root.Delete(true);
+        }
+    }
+}

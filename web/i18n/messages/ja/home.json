@@ -183,6 +183,8 @@
         "resume": "再開",
         "stop": "停止",
         "restart": "最初から生成",
+        "queued": "生成待ち",
+        "generating": "ドキュメントを生成中",
         "pauseSuccess": "生成を一時停止しました",
         "resumeSuccess": "生成を再開しました",
         "stopSuccess": "生成を停止しました",

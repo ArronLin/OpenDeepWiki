@@ -53,6 +53,7 @@ public class TestDbContext : DbContext, IContext
     public DbSet<TranslationTask> TranslationTasks { get; set; } = null!;
     public DbSet<IncrementalUpdateTask> IncrementalUpdateTasks { get; set; } = null!;
     public DbSet<BranchGenerationTask> BranchGenerationTasks { get; set; } = null!;
+    public DbSet<ScanModuleCheckpoint> ScanModuleCheckpoints { get; set; } = null!;
     public DbSet<RepositoryGenerationLock> RepositoryGenerationLocks { get; set; } = null!;
     public DbSet<WikiGenerationSlot> WikiGenerationSlots { get; set; } = null!;
     public DbSet<GraphifyArtifact> GraphifyArtifacts { get; set; } = null!;

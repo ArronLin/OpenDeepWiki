@@ -77,6 +77,7 @@ public class WikiGenerator : IWikiGenerator
     private readonly ISkillToolConverter _skillToolConverter;
     private readonly IAiProviderResolver _aiProviderResolver;
     private readonly IRepositoryScanPlanResolver _scanPlanResolver;
+    private readonly DeepRepositoryScan? _deepScan;
 
     // Use AsyncLocal for thread-safe repository ID tracking in concurrent scenarios
     private static readonly AsyncLocal<string?> _currentRepositoryId = new();
@@ -99,7 +100,8 @@ public class WikiGenerator : IWikiGenerator
         IProcessingLogService processingLogService,
         ISkillToolConverter skillToolConverter,
         IAiProviderResolver aiProviderResolver,
-        IRepositoryScanPlanResolver scanPlanResolver)
+        IRepositoryScanPlanResolver scanPlanResolver,
+        DeepRepositoryScan? deepScan = null)
     {
         _agentFactory = agentFactory ?? throw new ArgumentNullException(nameof(agentFactory));
         _promptPlugin = promptPlugin ?? throw new ArgumentNullException(nameof(promptPlugin));
@@ -111,6 +113,7 @@ public class WikiGenerator : IWikiGenerator
         _skillToolConverter = skillToolConverter ?? throw new ArgumentNullException(nameof(skillToolConverter));
         _aiProviderResolver = aiProviderResolver ?? throw new ArgumentNullException(nameof(aiProviderResolver));
         _scanPlanResolver = scanPlanResolver ?? throw new ArgumentNullException(nameof(scanPlanResolver));
+        _deepScan = deepScan;
 
         _logger.LogDebug(
             "WikiGenerator initialized. CatalogModel: {CatalogModel}, ContentModel: {ContentModel}, MaxRetryAttempts: {MaxRetry}",
@@ -247,6 +250,10 @@ Remember to call WriteMindMapAsync with the complete mind map content.
         BranchLanguage branchLanguage,
         CancellationToken cancellationToken = default)
     {
+        if (_deepScan is not null &&
+            await _deepScan.EnsureAsync(workspace, branchLanguage.RepositoryBranchId, cancellationToken) is not null)
+            return;
+
         var stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
             "Starting catalog generation. Repository: {Org}/{Repo}, Branch: {Branch}, Language: {Language}, BranchLanguageId: {BranchLanguageId}",
@@ -368,6 +375,13 @@ Execute the workflow now. The runtime context already contains the directory tre
         BranchLanguage branchLanguage,
         CancellationToken cancellationToken = default)
     {
+        if (_deepScan is not null &&
+            await _deepScan.EnsureAsync(workspace, branchLanguage.RepositoryBranchId, cancellationToken) is { } plan)
+        {
+            await _deepScan.GenerateAsync(workspace, branchLanguage, plan, cancellationToken);
+            return;
+        }
+
         var stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
             "Starting document generation. Repository: {Org}/{Repo}, Branch: {Branch}, Language: {Language}",

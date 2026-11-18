@@ -8,6 +8,8 @@ namespace OpenDeepWiki.Services.Repositories;
 /// </summary>
 public interface IRepositoryAnalyzer
 {
+    Task<RepositoryWorkspace> PreparePlanningWorkspaceAsync(Repository repository, string branchName, CancellationToken cancellationToken);
+
     /// <summary>
     /// Gets the latest remote HEAD commit ID for a branch without updating the local workspace.
     /// Returns null when the repository source does not support remote refs or the branch ref is absent.
@@ -72,6 +74,9 @@ public interface IRepositoryAnalyzer
 /// </summary>
 public class RepositoryWorkspace
 {
+    internal DeepScanPlan? GenerationPlan { get; set; }
+    internal string? GitObjectDirectory { get; init; }
+
     /// <summary>
     /// The absolute path to the working directory containing the repository files.
     /// Format: /data/{organization}/{name}/branches/{branch}/tree/

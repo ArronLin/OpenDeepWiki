@@ -46,6 +46,7 @@ public interface IContext : IDisposable
     DbSet<TranslationTask> TranslationTasks { get; set; }
     DbSet<IncrementalUpdateTask> IncrementalUpdateTasks { get; set; }
     DbSet<BranchGenerationTask> BranchGenerationTasks { get; set; }
+    DbSet<ScanModuleCheckpoint> ScanModuleCheckpoints { get; set; }
     DbSet<RepositoryGenerationLock> RepositoryGenerationLocks { get; set; }
     DbSet<WikiGenerationSlot> WikiGenerationSlots { get; set; }
     DbSet<GraphifyArtifact> GraphifyArtifacts { get; set; }
@@ -104,6 +105,7 @@ public abstract class MasterDbContext : DbContext, IContext
     public DbSet<TranslationTask> TranslationTasks { get; set; } = null!;
     public DbSet<IncrementalUpdateTask> IncrementalUpdateTasks { get; set; } = null!;
     public DbSet<BranchGenerationTask> BranchGenerationTasks { get; set; } = null!;
+    public DbSet<ScanModuleCheckpoint> ScanModuleCheckpoints { get; set; } = null!;
     public DbSet<RepositoryGenerationLock> RepositoryGenerationLocks { get; set; } = null!;
     public DbSet<WikiGenerationSlot> WikiGenerationSlots { get; set; } = null!;
     public DbSet<GraphifyArtifact> GraphifyArtifacts { get; set; } = null!;
@@ -356,6 +358,12 @@ public abstract class MasterDbContext : DbContext, IContext
             .HasIndex(t => new { t.BranchId, t.Status, t.Mode })
             .IsUnique()
             .HasAnnotation("Relational:Filter", "\"Status\" IN (0, 1)");
+
+        modelBuilder.Entity<BranchGenerationTask>().HasIndex(t => t.BranchId, "IX_ActiveScanPlan")
+            .IsUnique().HasAnnotation("Relational:Filter", "\"Mode\" = 1 AND \"Status\" IN (0,1) AND NOT \"IsDeleted\"");
+        modelBuilder.Entity<ScanModuleCheckpoint>().HasIndex(t => new { t.BranchId, t.VersionKey });
+        modelBuilder.Entity<ScanModuleCheckpoint>().HasOne<RepositoryBranch>().WithMany()
+            .HasForeignKey(t => t.BranchId).OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<RepositoryGenerationLock>()
             .HasIndex(l => l.RepositoryId)

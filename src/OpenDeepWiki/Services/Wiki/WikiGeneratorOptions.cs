@@ -184,7 +184,9 @@ public class WikiGeneratorOptions
     /// <summary>
     /// Whether Auto scan profiling may use an AI model. Rules are always the default and fallback.
     /// </summary>
-    public bool EnableAiScanProfile { get; set; } = false;
+    public bool EnableAiScanProfile { get; set; } = true;
+    public string? ScanPlanningProviderId { get; set; }
+    public string? ScanPlanningModelId { get; set; }
 
     /// <summary>
     /// Comma-separated list of language codes for multi-language wiki generation.

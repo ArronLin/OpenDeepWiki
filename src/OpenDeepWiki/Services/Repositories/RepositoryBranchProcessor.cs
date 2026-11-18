@@ -120,7 +120,6 @@ public sealed class RepositoryBranchProcessor(
 
             branch.LastCommitId = workspace.CommitId;
             branch.LastProcessedAt = DateTime.UtcNow;
-            context.RepositoryBranches.Update(branch);
             await context.SaveChangesAsync(cancellationToken);
 
             branchStopwatch.Stop();

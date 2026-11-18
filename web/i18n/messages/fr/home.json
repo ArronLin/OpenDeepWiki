@@ -197,6 +197,8 @@
         "resume": "Reprendre",
         "stop": "Arrêter",
         "restart": "Redémarrer",
+        "queued": "Génération en attente",
+        "generating": "Génération de la documentation",
         "pauseSuccess": "Génération mise en pause",
         "resumeSuccess": "Génération reprise",
         "stopSuccess": "Génération arrêtée",

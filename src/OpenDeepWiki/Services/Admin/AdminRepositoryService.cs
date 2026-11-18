@@ -842,6 +842,10 @@ public class AdminRepositoryService : IAdminRepositoryService
             repository.ScanProfileReason = null;
             repository.ScanProfileConfidence = null;
             repository.ScanProfileUpdatedAt = null;
+            var branches = await _context.RepositoryBranches
+                .Where(branch => branch.RepositoryId == id && !branch.IsDeleted).ToListAsync();
+            foreach (var branch in branches)
+                branch.DeepScanPlanJson = null;
         }
         repository.UpdateTimestamp();
 

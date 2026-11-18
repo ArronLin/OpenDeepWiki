@@ -8,6 +8,8 @@ namespace OpenDeepWiki.Entities;
 /// </summary>
 public class RepositoryBranch : AggregateRoot<string>
 {
+    public string? DeepScanPlanJson { get; set; }
+
     /// <summary>
     /// 仓库ID
     /// </summary>

@@ -145,8 +145,13 @@ public class AdminRepositoryManagementDto
     public AdminRepositoryScanPlanDto? ScanPlan { get; set; }
 }
 
+public sealed record ScanPlanEvaluationDto(string TaskId, string Status, string? ErrorMessage);
+
 public class AdminRepositoryScanPlanDto
 {
+    public ScanPlanEvaluationDto? LatestEvaluation { get; set; }
+    public OpenDeepWiki.Services.Repositories.DeepScanPlan? DeepPlan { get; set; }
+    public DeepScanLanguageProgress[]? DeepProgress { get; set; }
     public string Source { get; set; } = string.Empty;
     public string Mode { get; set; } = RepositoryScanDepthMode.Auto.ToString();
     public int DirectoryTreeDepth { get; set; }
@@ -160,6 +165,8 @@ public class AdminRepositoryScanPlanDto
     public double? Confidence { get; set; }
     public DateTime? UpdatedAt { get; set; }
 }
+
+public sealed record DeepScanLanguageProgress(string Language, OpenDeepWiki.Services.Repositories.DeepScanProgress? Progress);
 
 public class UpdateRepositoryScanPlanRequest
 {

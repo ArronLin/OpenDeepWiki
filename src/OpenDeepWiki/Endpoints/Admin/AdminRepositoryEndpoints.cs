@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OpenDeepWiki.Entities;
 using OpenDeepWiki.Models.Admin;
 using OpenDeepWiki.Services.Admin;
 using OpenDeepWiki.Services.Graphify;
+using OpenDeepWiki.Services.Repositories;
 
 namespace OpenDeepWiki.Endpoints.Admin;
 
@@ -112,11 +115,39 @@ public static class AdminRepositoryEndpoints
         // 获取仓库扫描策略
         repoGroup.MapGet("/{id}/scan-plan", async (
             string id,
-            [FromServices] IAdminRepositoryService repositoryService) =>
+            string? branchId,
+            [FromServices] IAdminRepositoryService repositoryService,
+            [FromServices] OpenDeepWiki.EFCore.IContext context,
+            CancellationToken cancellationToken) =>
         {
             var result = await repositoryService.GetScanPlanAsync(id);
             if (result == null)
                 return Results.NotFound(new { success = false, message = "仓库不存在" });
+            var branch = await context.RepositoryBranches.AsNoTracking()
+                .Where(item => item.RepositoryId == id && !item.IsDeleted && (branchId == null || item.Id == branchId))
+                .OrderByDescending(item => item.LastProcessedAt).ThenBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            var plan = DeepRepositoryScan.ReadPlan(branch?.DeepScanPlanJson);
+            result.DeepPlan = plan;
+            if (branch is not null)
+            {
+                result.LatestEvaluation = await context.BranchGenerationTasks.AsNoTracking()
+                    .Where(task => task.BranchId == branch.Id && !task.IsDeleted &&
+                        task.Mode == BranchGenerationTaskMode.ScanPlan)
+                    .OrderByDescending(task => task.Status == BranchGenerationTaskStatus.Pending ||
+                        task.Status == BranchGenerationTaskStatus.Processing)
+                    .ThenByDescending(task => task.UpdatedAt ?? task.CreatedAt).ThenByDescending(task => task.Id)
+                    .Select(task => new ScanPlanEvaluationDto(task.Id, task.Status.ToString(), task.ErrorMessage))
+                    .FirstOrDefaultAsync(cancellationToken);
+            }
+            if (plan is not null && branch is not null)
+            {
+                var entries = await context.BranchLanguages.AsNoTracking()
+                    .Where(item => item.RepositoryBranchId == branch.Id && !item.IsDeleted)
+                    .Select(item => new { item.LanguageCode, item.DeepScanProgressJson }).ToListAsync(cancellationToken);
+                result.DeepProgress = entries.Select(item => new DeepScanLanguageProgress(item.LanguageCode,
+                    DeepRepositoryScan.ReadProgress(item.DeepScanProgressJson))).ToArray();
+            }
             return Results.Ok(new { success = true, data = result });
         })
         .WithName("AdminGetRepositoryScanPlan")
@@ -139,15 +170,21 @@ public static class AdminRepositoryEndpoints
         // 重新评估仓库扫描策略
         repoGroup.MapPost("/{id}/scan-plan/reevaluate", async (
             string id,
-            [FromServices] IAdminRepositoryService repositoryService,
+            string? branchId,
+            [FromServices] OpenDeepWiki.EFCore.IContext context,
+            [FromServices] IBranchGenerationTaskService taskService,
             CancellationToken cancellationToken) =>
         {
-            var result = await repositoryService.ReevaluateScanPlanAsync(id, cancellationToken);
-            if (result == null)
-                return Results.NotFound(new { success = false, message = "仓库不存在" });
-
-            var response = new { success = result.Success, message = result.Message, data = result.ScanPlan };
-            return result.Success ? Results.Ok(response) : Results.Conflict(response);
+            var branch = await context.RepositoryBranches.AsNoTracking()
+                .Where(item => item.RepositoryId == id && !item.IsDeleted && (branchId == null || item.Id == branchId))
+                .OrderByDescending(item => item.LastProcessedAt).ThenBy(item => item.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (branch is null)
+                return Results.NotFound(new { success = false, message = "仓库或分支不存在" });
+            var result = await taskService.EnqueueScanPlanAsync(id, branch.Id, cancellationToken);
+            return result.Success
+                ? Results.Accepted(value: new { success = true, taskId = result.Task!.Id })
+                : Results.Conflict(new { success = false, message = result.ErrorMessage });
         })
         .WithName("AdminReevaluateRepositoryScanPlan")
         .WithSummary("重新评估仓库扫描策略");

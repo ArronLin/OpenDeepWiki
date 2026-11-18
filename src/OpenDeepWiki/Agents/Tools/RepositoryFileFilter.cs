@@ -8,17 +8,21 @@ public sealed class RepositoryFileFilter
     private readonly string _workingDirectory;
     private readonly List<GitIgnoreRule> _gitIgnoreRules;
 
-    public RepositoryFileFilter(string workingDirectory)
+    public RepositoryFileFilter(string workingDirectory) : this(workingDirectory, ParseGitIgnore(workingDirectory)) { }
+
+    internal RepositoryFileFilter(string workingDirectory, List<GitIgnoreRule> rules)
     {
         _workingDirectory = Path.GetFullPath(workingDirectory);
-        _gitIgnoreRules = ParseGitIgnore(_workingDirectory);
+        _gitIgnoreRules = rules;
     }
 
     public bool IsIgnored(string fullPath)
     {
         var relativePath = GetRelativePath(fullPath);
-        return IsHiddenPath(relativePath) || IsIgnoredByGitIgnore(relativePath);
+        return IsIgnoredRelativePath(relativePath);
     }
+
+    internal bool IsIgnoredRelativePath(string path) => IsHiddenPath(path) || IsIgnoredByGitIgnore(path);
 
     public bool IsLowValueFile(string fullPath)
     {
@@ -87,20 +91,7 @@ public sealed class RepositoryFileFilter
 
             try
             {
-                foreach (var line in File.ReadAllLines(gitignorePath))
-                {
-                    var trimmedLine = line.Trim();
-                    if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith('#'))
-                    {
-                        continue;
-                    }
-
-                    var rule = ParseGitIgnorePattern(trimmedLine, baseRelativePath);
-                    if (rule != null)
-                    {
-                        rules.Add(rule);
-                    }
-                }
+                AddIgnoreRules(rules, baseRelativePath, File.ReadLines(gitignorePath));
             }
             catch
             {
@@ -109,6 +100,16 @@ public sealed class RepositoryFileFilter
         }
 
         return rules;
+    }
+
+    internal static void AddIgnoreRules(List<GitIgnoreRule> rules, string directory, IEnumerable<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            var pattern = line.Trim();
+            if (pattern.Length > 0 && !pattern.StartsWith('#') && ParseGitIgnorePattern(pattern, directory) is { } rule)
+                rules.Add(rule);
+        }
     }
 
     private bool IsHiddenPath(string relativePath)

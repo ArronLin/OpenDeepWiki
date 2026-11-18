@@ -61,15 +61,17 @@ public sealed class BranchGenerationWorker(
         await RecoverProcessingTasksWithoutLocksAsync(context, processingLogService, stoppingToken);
 
         var inFlightIds = _inFlight.Keys.ToHashSet();
-        var pendingTasks = await context.BranchGenerationTasks
+        var pending = context.BranchGenerationTasks
             .AsNoTracking()
             .Where(item => !item.IsDeleted &&
                            item.Status == BranchGenerationTaskStatus.Pending &&
                            !inFlightIds.Contains(item.Id))
             .OrderByDescending(item => item.Priority)
-            .ThenBy(item => item.CreatedAt)
-            .Take(20)
-            .ToListAsync(stoppingToken);
+            .ThenBy(item => item.CreatedAt);
+        var pendingTasks = await pending.Where(item => item.Mode == BranchGenerationTaskMode.ScanPlan)
+            .Take(1).ToListAsync(stoppingToken);
+        pendingTasks.AddRange(await pending.Where(item => item.Mode == BranchGenerationTaskMode.Full)
+            .Take(20).ToListAsync(stoppingToken));
 
         foreach (var task in pendingTasks)
         {
@@ -81,11 +83,12 @@ public sealed class BranchGenerationWorker(
                 RepositoryGenerationLockOwnerType.BranchTask,
                 task.Id,
                 RepositoryGenerationLockScope.Branch,
-                WikiGenerationWorkType.BranchTask,
+                task.Mode == BranchGenerationTaskMode.ScanPlan ? WikiGenerationWorkType.ScanPlan : WikiGenerationWorkType.BranchTask,
                 stoppingToken);
 
             if (status == WikiGenerationAcquireStatus.ClusterFull)
             {
+                if (task.Mode == BranchGenerationTaskMode.ScanPlan) continue;
                 logger.LogInformation(
                     "Wiki generation cluster is full. MaxConcurrentGenerations: {MaxConcurrent}",
                     wikiOptions.CurrentValue.GetMaxConcurrentGenerations());
@@ -142,6 +145,8 @@ public sealed class BranchGenerationWorker(
         }
 
         var task = claim.Task;
+        using var job = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var monitor = MonitorStopRequestAsync(task.Id, job);
 
         try
         {
@@ -160,30 +165,70 @@ public sealed class BranchGenerationWorker(
                     task.BranchId,
                     task.Id,
                     ProcessingStep.Workspace,
-                    $"Starting branch full generation: {branch.BranchName}",
+                    $"Starting branch {task.Mode}: {branch.BranchName}",
                     cancellationToken: stoppingToken);
             }
 
-            var targetCommitId = await branchProcessor.ProcessBranchAsync(
+            string? targetCommitId;
+            if (task.Mode == BranchGenerationTaskMode.ScanPlan)
+            {
+                var analyzer = scope.ServiceProvider.GetRequiredService<IRepositoryAnalyzer>();
+                var scan = scope.ServiceProvider.GetRequiredService<DeepRepositoryScan>();
+                var workspace = await analyzer.PreparePlanningWorkspaceAsync(repository, branch.BranchName, job.Token);
+                try
+                {
+                    var plan = await scan.EvaluateAsync(workspace, branch, requireAi: true, job.Token);
+                    targetCommitId = plan.Commit;
+                }
+                finally
+                {
+                    await analyzer.CleanupWorkspaceAsync(workspace, CancellationToken.None);
+                }
+            }
+            else targetCommitId = await branchProcessor.ProcessBranchAsync(
                 context,
                 repository,
                 branch,
                 task.Id,
                 forceFullGeneration: true,
-                stoppingToken);
+                job.Token);
 
+            job.Token.ThrowIfCancellationRequested();
             task.TargetCommitId = targetCommitId;
             task.Status = BranchGenerationTaskStatus.Completed;
             task.CompletedAt = DateTime.UtcNow;
             task.UpdateTimestamp();
 
-            branch.GenerationStatus = BranchGenerationTaskStatus.Completed;
-            branch.LastGenerationTaskId = task.Id;
-            branch.LastGenerationError = null;
-            branch.LastGenerationCompletedAt = task.CompletedAt;
-            branch.UpdateTimestamp();
+            if (task.Mode == BranchGenerationTaskMode.Full)
+            {
+                branch.GenerationStatus = BranchGenerationTaskStatus.Completed;
+                branch.LastGenerationTaskId = task.Id;
+                branch.LastGenerationError = null;
+                branch.LastGenerationCompletedAt = task.CompletedAt;
+                branch.UpdateTimestamp();
+            }
 
             await context.SaveChangesAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && job.IsCancellationRequested)
+        {
+            using var statusScope = scopeFactory.CreateScope();
+            var statusContext = statusScope.ServiceProvider.GetRequiredService<IContext>();
+            var stored = await statusContext.BranchGenerationTasks.SingleAsync(item => item.Id == taskId);
+            stored.Status = stored.RequestedStopStatus ?? BranchGenerationTaskStatus.Cancelled;
+            stored.RequestedStopStatus = null;
+            stored.CompletedAt = DateTime.UtcNow;
+            stored.UpdateTimestamp();
+            if (stored.Mode == BranchGenerationTaskMode.Full)
+            {
+                var branch = await statusContext.RepositoryBranches.FindAsync(stored.BranchId);
+                if (branch is not null)
+                {
+                    branch.GenerationStatus = stored.Status;
+                    branch.LastGenerationCompletedAt = stored.CompletedAt;
+                }
+            }
+            await statusContext.SaveChangesAsync();
         }
         catch (OperationCanceledException ex) when (stoppingToken.IsCancellationRequested)
         {
@@ -202,7 +247,38 @@ public sealed class BranchGenerationWorker(
         }
         finally
         {
+            await job.CancelAsync();
+            await monitor;
             await coordinator.ReleaseAsync(context, lease, CancellationToken.None);
+        }
+    }
+
+    private async Task MonitorStopRequestAsync(string taskId, CancellationTokenSource job)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+            while (await timer.WaitForNextTickAsync(job.Token))
+            {
+                using var scope = scopeFactory.CreateScope();
+                var context = scope.ServiceProvider.GetRequiredService<IContext>();
+                try
+                {
+                    if (await context.BranchGenerationTasks.AnyAsync(item =>
+                        item.Id == taskId && item.RequestedStopStatus != null, job.Token))
+                    {
+                        await job.CancelAsync();
+                        return;
+                    }
+                }
+                catch (Exception ex) when (!job.IsCancellationRequested)
+                {
+                    logger.LogWarning(ex, "Could not check stop request for task {TaskId}", taskId);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (job.IsCancellationRequested)
+        {
         }
     }
 
@@ -242,7 +318,7 @@ public sealed class BranchGenerationWorker(
             var branch = await context.RepositoryBranches
                 .FirstOrDefaultAsync(item => item.Id == task.BranchId && item.RepositoryId == task.RepositoryId && !item.IsDeleted, stoppingToken);
 
-            if (branch is not null)
+            if (branch is not null && task.Mode == BranchGenerationTaskMode.Full)
             {
                 branch.GenerationStatus = BranchGenerationTaskStatus.Processing;
                 branch.LastGenerationTaskId = task.Id;
@@ -278,7 +354,7 @@ public sealed class BranchGenerationWorker(
         fallbackTask.ErrorMessage = null;
         fallbackTask.UpdateTimestamp();
 
-        if (fallbackBranch is not null)
+        if (fallbackBranch is not null && fallbackTask.Mode == BranchGenerationTaskMode.Full)
         {
             fallbackBranch.GenerationStatus = BranchGenerationTaskStatus.Processing;
             fallbackBranch.LastGenerationTaskId = fallbackTask.Id;
@@ -300,6 +376,8 @@ public sealed class BranchGenerationWorker(
         var orphanedTasks = await context.BranchGenerationTasks
             .Where(task => !task.IsDeleted &&
                            task.Status == BranchGenerationTaskStatus.Processing &&
+                           !context.WikiGenerationSlots.Any(slot => slot.OwnerId == task.Id &&
+                               slot.WorkType == WikiGenerationWorkType.ScanPlan && slot.InstanceId != null && !slot.IsDeleted) &&
                            !context.RepositoryGenerationLocks.Any(generationLock =>
                                !generationLock.IsDeleted &&
                                generationLock.RepositoryId == task.RepositoryId &&
@@ -340,7 +418,7 @@ public sealed class BranchGenerationWorker(
         var branch = await context.RepositoryBranches
             .FirstOrDefaultAsync(item => item.Id == task.BranchId && !item.IsDeleted, cancellationToken);
 
-        if (branch is not null)
+        if (branch is not null && task.Mode == BranchGenerationTaskMode.Full)
         {
             branch.GenerationStatus = BranchGenerationTaskStatus.Failed;
             branch.LastGenerationTaskId = task.Id;

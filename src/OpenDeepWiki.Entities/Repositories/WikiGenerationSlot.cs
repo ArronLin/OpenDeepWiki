@@ -7,7 +7,8 @@ public enum WikiGenerationWorkType
 {
     Repository = 0,
     BranchTask = 1,
-    IncrementalTask = 2
+    IncrementalTask = 2,
+    ScanPlan = 3
 }
 
 /// <summary>

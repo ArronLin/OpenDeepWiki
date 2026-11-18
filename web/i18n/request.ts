@@ -21,7 +21,21 @@ async function loadMessages(locale: Locale) {
   const settings = (await import(`./messages/${locale}/settings.json`)).default;
   const profile = (await import(`./messages/${locale}/profile.json`)).default;
   const apps = (await import(`./messages/${locale}/apps.json`)).default;
-  const admin = (await import(`./messages/${locale}/admin.json`)).default;
+  const localizedAdmin = (await import(`./messages/${locale}/admin.json`)).default;
+  const englishAdmin = (await import("./messages/en/admin.json")).default;
+  const admin = {
+    ...localizedAdmin,
+    repositories: {
+      ...localizedAdmin.repositories,
+      management: {
+        ...localizedAdmin.repositories.management,
+        scanPlan: {
+          ...englishAdmin.repositories.management.scanPlan,
+          ...localizedAdmin.repositories.management.scanPlan,
+        },
+      },
+    },
+  };
   const chat = (await import(`./messages/${locale}/chat.json`)).default;
   const subscribe = (await import(`./messages/${locale}/subscribe.json`)).default;
 

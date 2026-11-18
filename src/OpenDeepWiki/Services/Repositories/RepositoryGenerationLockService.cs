@@ -364,7 +364,7 @@ public sealed class RepositoryGenerationLockService : IRepositoryGenerationLockS
                 .FirstOrDefaultAsync(item =>
                     item.Id == (task != null ? task.BranchId : string.Empty) && !item.IsDeleted,
                     cancellationToken);
-            if (branch is { GenerationStatus: BranchGenerationTaskStatus.Processing })
+            if (task?.Mode == BranchGenerationTaskMode.Full && branch is { GenerationStatus: BranchGenerationTaskStatus.Processing })
             {
                 branch.GenerationStatus = BranchGenerationTaskStatus.Pending;
                 branch.LastGenerationError = null;

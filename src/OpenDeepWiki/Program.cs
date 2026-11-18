@@ -179,6 +179,7 @@ try
     builder.Services.AddScoped<IRepositoryBranchProcessor, RepositoryBranchProcessor>();
     builder.Services.AddScoped<IBranchGenerationTaskService, BranchGenerationTaskService>();
     builder.Services.AddScoped<IRepositoryScanPlanResolver, RepositoryScanPlanResolver>();
+    builder.Services.AddScoped<DeepRepositoryScan>();
 
     // Configure Graphify artifact generation
     builder.Services.AddOptions<GraphifyOptions>()

@@ -470,8 +470,9 @@ public class RepositoryAnalyzerSourceTests
             ["clone", "--no-local", argument, "--no-checkout", sourceRoot, "/tmp/target"],
             [sourceRoot, gitDir]);
 
-        Assert.Contains($"-c 'safe.directory={sourceRoot}'", argument);
-        Assert.Contains($"-c 'safe.directory={gitDir}'", argument);
+        var quote = OperatingSystem.IsWindows() ? '"' : '\'';
+        Assert.Contains($"-c {quote}safe.directory={sourceRoot}{quote}", argument);
+        Assert.Contains($"-c {quote}safe.directory={gitDir}{quote}", argument);
         Assert.EndsWith(" upload-pack", argument);
         Assert.Equal("-c", processArguments[0]);
         Assert.Equal($"safe.directory={sourceRoot}", processArguments[1]);

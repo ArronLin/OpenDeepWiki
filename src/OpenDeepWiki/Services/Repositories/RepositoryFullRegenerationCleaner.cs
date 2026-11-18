@@ -86,9 +86,5 @@ public sealed class RepositoryFullRegenerationCleaner : IRepositoryFullRegenerat
             branch.UpdateTimestamp();
         }
 
-        if (branches.Count > 0)
-        {
-            context.RepositoryBranches.UpdateRange(branches);
-        }
     }
 }

@@ -153,11 +153,44 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     }
 
     /// <inheritdoc />
-    public async Task<RepositoryWorkspace> PrepareWorkspaceAsync(
+    public Task<RepositoryWorkspace> PrepareWorkspaceAsync(
         Entities.Repository repository,
         string branchName,
         string? previousCommitId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        PrepareWorkspaceCoreAsync(repository, branchName, previousCommitId, false, cancellationToken);
+
+    public async Task<RepositoryWorkspace> PreparePlanningWorkspaceAsync(Entities.Repository repository,
+        string branchName, CancellationToken cancellationToken)
+    {
+        var source = RepositorySource.Parse(repository.GitUrl);
+        if (source.SourceType is RepositorySourceType.LocalDirectory or RepositorySourceType.Git)
+        {
+            var checkout = GetWorkingDirectory(repository.OrgName, repository.RepoName, branchName);
+            var head = await GetRemoteBranchHeadCommitAsync(repository, branchName, cancellationToken);
+            if (head is not null)
+            {
+                var stores = source.SourceType == RepositorySourceType.LocalDirectory
+                    ? new[] { checkout, source.Location } : new[] { checkout };
+                foreach (var store in stores)
+                {
+                    if (!GitRepository.IsValid(store)) continue;
+                    using var git = new GitRepository(store);
+                    if (git.Lookup<Commit>(head) is null) continue;
+                    return new RepositoryWorkspace
+                    {
+                        WorkingDirectory = store, GitObjectDirectory = store, CommitId = head,
+                        Organization = repository.OrgName, RepositoryName = repository.RepoName,
+                        SourceType = source.SourceType, SourceLocation = source.Location, BranchName = branchName
+                    };
+                }
+            }
+        }
+        return await PrepareWorkspaceCoreAsync(repository, branchName, null, true, cancellationToken);
+    }
+
+    private async Task<RepositoryWorkspace> PrepareWorkspaceCoreAsync(Entities.Repository repository,
+        string branchName, string? previousCommitId, bool planning, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
         var sourceInfo = RepositorySource.Parse(repository.GitUrl);
@@ -172,7 +205,7 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             SourceLocation = sourceInfo.Location,
             GitUrl = sourceInfo.SourceType == RepositorySourceType.Git ? sourceInfo.Location : string.Empty,
             PreviousCommitId = previousCommitId,
-            WorkingDirectory = GetWorkingDirectory(repository.OrgName, repository.RepoName, branchName),
+            WorkingDirectory = GetWorkingDirectory(repository.OrgName, repository.RepoName, branchName) + (planning ? ".scan-plan" : ""),
             SupportsIncrementalUpdates = sourceInfo.SourceType == RepositorySourceType.Git,
             LocalDirectoryImportModeUsed = LocalDirectoryImportMode.Copy
         };
@@ -219,7 +252,7 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         else if (workspace.SourceType == RepositorySourceType.Archive)
         {
             await PrepareArchiveWorkspaceAsync(workspace, cancellationToken);
-            workspace.CommitId = ComputeDirectorySnapshotId(workspace.WorkingDirectory);
+            workspace.CommitId = await ComputeDirectorySnapshotIdAsync(workspace.WorkingDirectory, cancellationToken);
         }
         else if (TryResolveLocalGitSource(workspace.SourceLocation, out var localGitSource, out var localGitFailureReason))
         {
@@ -237,7 +270,7 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             }
 
             await PrepareLocalDirectoryWorkspaceAsync(workspace, cancellationToken);
-            workspace.CommitId = ComputeDirectorySnapshotId(workspace.WorkingDirectory);
+            workspace.CommitId = await ComputeDirectorySnapshotIdAsync(workspace.WorkingDirectory, cancellationToken);
         }
 
         stopwatch.Stop();
@@ -254,6 +287,8 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     /// <inheritdoc />
     public Task CleanupWorkspaceAsync(RepositoryWorkspace workspace, CancellationToken cancellationToken = default)
     {
+        // Object stores belong to the source or an existing checkout. Planning only borrows them.
+        if (workspace.GitObjectDirectory is not null) return Task.CompletedTask;
         if (!_options.CleanupAfterProcessing)
         {
             _logger.LogDebug(
@@ -1314,26 +1349,23 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         GitCli
     }
 
-    private static string ComputeDirectorySnapshotId(string directoryPath)
+    internal static async Task<string> ComputeDirectorySnapshotIdAsync(string directoryPath, CancellationToken ct)
     {
-        using var sha = SHA256.Create();
-        var files = Directory.GetFiles(directoryPath, "*", SearchOption.AllDirectories)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
-
-        foreach (var file in files)
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var options = new EnumerationOptions { RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
+        var files = Directory.EnumerateFiles(directoryPath, "*", options)
+            .Select(path => Path.GetRelativePath(directoryPath, path).Replace(Path.DirectorySeparatorChar, '/'))
+            .Order(StringComparer.Ordinal);
+        foreach (var path in files)
         {
-            var info = new FileInfo(file);
-            var relativePathBytes = System.Text.Encoding.UTF8.GetBytes(Path.GetRelativePath(directoryPath, file));
-            sha.TransformBlock(relativePathBytes, 0, relativePathBytes.Length, null, 0);
-
-            var metadata = BitConverter.GetBytes(info.Length)
-                .Concat(BitConverter.GetBytes(info.LastWriteTimeUtc.Ticks))
-                .ToArray();
-            sha.TransformBlock(metadata, 0, metadata.Length, null, 0);
+            ct.ThrowIfCancellationRequested();
+            sha.AppendData(System.Text.Encoding.UTF8.GetBytes(path));
+            sha.AppendData([0]);
+            using var stream = File.OpenRead(Path.Combine(directoryPath, path));
+            sha.AppendData(await SHA256.HashDataAsync(stream, ct));
         }
-
-        sha.TransformFinalBlock([], 0, 0);
-        return Convert.ToHexString(sha.Hash!);
+        return Convert.ToHexString(sha.GetHashAndReset());
     }
 
     private static async Task<bool> TryCreateDirectoryLinkAsync(

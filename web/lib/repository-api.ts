@@ -246,14 +246,10 @@ export async function updateRepositoryVisibility(
  * Fetch repository status (client-side polling)
  */
 export async function fetchRepoStatus(owner: string, repo: string): Promise<RepoTreeResponse> {
-  const url = buildApiUrl(
+  return api.get<RepoTreeResponse>(
     `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree`,
+    { cache: "no-store" },
   );
-
-  // 生成状态轮询接口：仅短缓存，保证处理进度相对新鲜
-  return cachedFetchJson<RepoTreeResponse>(url, {
-    headers: await getSSRAuthHeaders(),
-  }, PROCESSING_STATUS_TTL_MS);
 }
 
 
@@ -277,12 +273,13 @@ export async function fetchProcessingLogs(
   if (taskId) params.set("taskId", taskId);
 
   const queryString = params.toString();
-  const url = buildApiUrl(
-    `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/processing-logs${queryString ? `?${queryString}` : ""}`
-  );
+  const path = `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/processing-logs${queryString ? `?${queryString}` : ""}`;
+  if (typeof window !== "undefined") {
+    return api.get<ProcessingLogResponse>(path, { cache: "no-store" });
+  }
 
   // 处理日志轮询接口：仅短缓存，保证处理进度相对新鲜
-  return cachedFetchJson<ProcessingLogResponse>(url, {
+  return cachedFetchJson<ProcessingLogResponse>(buildApiUrl(path), {
     headers: await getSSRAuthHeaders(),
   }, PROCESSING_STATUS_TTL_MS);
 }

@@ -197,6 +197,8 @@
         "resume": "Fortsetzen",
         "stop": "Stoppen",
         "restart": "Neu starten",
+        "queued": "Zur Generierung eingereiht",
+        "generating": "Dokumentation wird generiert",
         "pauseSuccess": "Generierung pausiert",
         "resumeSuccess": "Generierung fortgesetzt",
         "stopSuccess": "Generierung gestoppt",

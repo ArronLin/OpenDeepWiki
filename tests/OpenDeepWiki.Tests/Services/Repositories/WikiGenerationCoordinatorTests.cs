@@ -11,6 +11,26 @@ namespace OpenDeepWiki.Tests.Services.Repositories;
 public class WikiGenerationCoordinatorTests
 {
     [Fact]
+    public async Task PlannerRunsBesideSameRepositoryGenerationWithOnlyOneGenerationSlot()
+    {
+        using var context = CreateContext();
+        SeedRepository(context, "repo");
+        await context.SaveChangesAsync();
+        var coordinator = CreateCoordinator(context, "worker", maxConcurrent: 1);
+        var documents = await BeginRepositoryAsync(coordinator, context, "repo");
+        var evaluation = await coordinator.TryBeginAsync(context, "repo", RepositoryGenerationLockOwnerType.BranchTask,
+            "evaluation", RepositoryGenerationLockScope.Branch, WikiGenerationWorkType.ScanPlan);
+        Assert.NotNull(documents.Lease);
+        Assert.NotNull(evaluation.Lease);
+        Assert.NotEqual(documents.Lease.SlotIndex, evaluation.Lease.SlotIndex);
+        var second = await coordinator.TryBeginAsync(context, "repo", RepositoryGenerationLockOwnerType.BranchTask,
+            "another-evaluation", RepositoryGenerationLockScope.Branch, WikiGenerationWorkType.ScanPlan);
+        Assert.Equal(WikiGenerationAcquireStatus.ClusterFull, second.Status);
+        await coordinator.ReleaseAsync(context, evaluation.Lease);
+        Assert.Equal(documents.Lease.OwnerId, (await context.RepositoryGenerationLocks.SingleAsync()).OwnerId);
+    }
+
+    [Fact]
     public async Task TryBeginAsync_WhenMaxConcurrentIsOne_SecondAcquireIsClusterFull()
     {
         using var context = CreateContext();

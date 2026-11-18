@@ -183,6 +183,8 @@
         "resume": "계속",
         "stop": "중지",
         "restart": "다시 시작",
+        "queued": "생성 대기 중",
+        "generating": "문서 생성 중",
         "pauseSuccess": "생성을 일시 중지했습니다",
         "resumeSuccess": "생성을 계속합니다",
         "stopSuccess": "생성을 중지했습니다",

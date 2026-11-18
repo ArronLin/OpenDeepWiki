@@ -197,6 +197,8 @@
         "resume": "继续",
         "stop": "停止",
         "restart": "重新开始",
+        "queued": "排队等待生成",
+        "generating": "正在生成文档",
         "pauseSuccess": "已暂停生成",
         "resumeSuccess": "已继续生成",
         "stopSuccess": "已停止生成",

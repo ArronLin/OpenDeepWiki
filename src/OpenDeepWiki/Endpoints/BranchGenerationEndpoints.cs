@@ -26,6 +26,8 @@ public static class BranchGenerationEndpoints
             .WithName("RetryBranchGenerationTask");
         taskGroup.MapPost("/{taskId}/cancel", CancelAsync)
             .WithName("CancelBranchGenerationTask");
+        taskGroup.MapPost("/{taskId}/pause", PauseAsync)
+            .WithName("PauseBranchGenerationTask");
 
         return app;
     }
@@ -82,9 +84,18 @@ public static class BranchGenerationEndpoints
         return ToResult(result);
     }
 
+    private static async Task<IResult> PauseAsync(string taskId, [FromServices] IContext context,
+        [FromServices] IUserContext userContext, [FromServices] IBranchGenerationTaskService taskService,
+        CancellationToken cancellationToken)
+    {
+        var denied = await AuthorizeTaskMutationAsync(context, userContext, taskId, cancellationToken);
+        return denied ?? ToResult(await taskService.PauseAsync(taskId, cancellationToken));
+    }
+
     private static async Task<IResult> GetTaskAsync(
         string taskId,
         [FromServices] IContext context,
+        [FromServices] IUserContext userContext,
         CancellationToken cancellationToken)
     {
         var task = await context.BranchGenerationTasks
@@ -92,6 +103,12 @@ public static class BranchGenerationEndpoints
             .Include(item => item.Repository)
             .Include(item => item.Branch)
             .FirstOrDefaultAsync(item => item.Id == taskId && !item.IsDeleted, cancellationToken);
+
+        if (task?.Mode == BranchGenerationTaskMode.ScanPlan)
+        {
+            var denied = await AuthorizeRepositoryMutationAsync(context, userContext, task.RepositoryId, cancellationToken);
+            if (denied is not null) return denied;
+        }
 
         return task is null
             ? Results.NotFound(new BranchGenerationErrorResponse(false, "TASK_NOT_FOUND", "任务不存在"))

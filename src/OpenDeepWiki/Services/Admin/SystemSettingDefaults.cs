@@ -45,6 +45,8 @@ public static class SystemSettingDefaults
         ("WIKI_MAX_FILES_PER_DIRECTORY", "ai", "Maximum files shown per directory"),
         ("WIKI_MAX_TOTAL_TREE_FILES", "ai", "Maximum total files shown in directory tree"),
         ("WIKI_ENABLE_AI_SCAN_PROFILE", "ai", "Enable AI-assisted repository scan profiling"),
+        ("WIKI_SCAN_PLANNING_PROVIDER_ID", "ai", "Provider for scan planning; blank inherits content provider"),
+        ("WIKI_SCAN_PLANNING_MODEL_ID", "ai", "Model for scan planning; blank inherits content model"),
         ("WIKI_MAX_RETRY_ATTEMPTS", "ai", "Maximum retry attempts"),
         ("WIKI_RETRY_DELAY_MS", "ai", "Retry delay (milliseconds)"),
         ("WIKI_PROMPTS_DIRECTORY", "ai", "Prompt templates directory")
@@ -143,6 +145,8 @@ public static class SystemSettingDefaults
             "WIKI_MAX_FILES_PER_DIRECTORY" => options.MaxFilesPerDirectory.ToString(),
             "WIKI_MAX_TOTAL_TREE_FILES" => options.MaxTotalTreeFiles.ToString(),
             "WIKI_ENABLE_AI_SCAN_PROFILE" => options.EnableAiScanProfile.ToString(),
+            "WIKI_SCAN_PLANNING_PROVIDER_ID" => options.ScanPlanningProviderId,
+            "WIKI_SCAN_PLANNING_MODEL_ID" => options.ScanPlanningModelId,
             "WIKI_MAX_RETRY_ATTEMPTS" => options.MaxRetryAttempts.ToString(),
             "WIKI_RETRY_DELAY_MS" => options.RetryDelayMs.ToString(),
             "WIKI_PROMPTS_DIRECTORY" => options.PromptsDirectory,
@@ -225,6 +229,12 @@ public static class SystemSettingDefaults
                 break;
             case "WIKI_ENABLE_AI_SCAN_PROFILE" when bool.TryParse(value, out var enableAiScanProfile):
                 options.EnableAiScanProfile = enableAiScanProfile;
+                break;
+            case "WIKI_SCAN_PLANNING_PROVIDER_ID":
+                options.ScanPlanningProviderId = string.IsNullOrWhiteSpace(value) ? null : value;
+                break;
+            case "WIKI_SCAN_PLANNING_MODEL_ID":
+                options.ScanPlanningModelId = string.IsNullOrWhiteSpace(value) ? null : value;
                 break;
             case "WIKI_MAX_RETRY_ATTEMPTS" when int.TryParse(value, out var retryAttempts):
                 options.MaxRetryAttempts = retryAttempts;

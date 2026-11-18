@@ -49,6 +49,16 @@ public static class DbInitializer
             {
                 await MigratePostgresqlAsync(migrationCtx);
             }
+            await migrationCtx.Database.ExecuteSqlRawAsync("""
+                CREATE TABLE IF NOT EXISTS "ScanModuleCheckpoints" (
+                    "Id" TEXT PRIMARY KEY, "BranchId" TEXT NOT NULL REFERENCES "RepositoryBranches" ("Id") ON DELETE CASCADE,
+                    "VersionKey" TEXT NOT NULL, "ModuleRoot" TEXT NOT NULL, "ResultJson" TEXT NOT NULL, "ExcerptsJson" TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS "IX_ScanModuleCheckpoints_BranchId_VersionKey"
+                    ON "ScanModuleCheckpoints" ("BranchId","VersionKey");
+                CREATE UNIQUE INDEX IF NOT EXISTS "IX_ActiveScanPlan" ON "BranchGenerationTasks" ("BranchId")
+                    WHERE "Mode" = 1 AND "Status" IN (0,1) AND NOT "IsDeleted";
+                """);
         }
 
         // 初始化默认 MCP 提供商
@@ -506,6 +516,9 @@ public static class DbInitializer
         await AddSqliteColumnIfMissingAsync(connection, ctx, "Repositories", "ScanProfileUpdatedAt", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "BranchLanguages", "SkillGeneratedAt", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "BranchLanguages", "SkillMarkdown", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "BranchLanguages", "DeepScanProgressJson", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "RepositoryBranches", "DeepScanPlanJson", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "BranchGenerationTasks", "RequestedStopStatus", "INTEGER");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "ModelConfigs", "AiProviderId", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "ChatApps", "AiProviderId", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "AiModelConfigs", "ProviderType", "TEXT");
@@ -775,6 +788,9 @@ public static class DbInitializer
             ALTER TABLE ""Repositories"" ADD COLUMN IF NOT EXISTS ""ScanProfileUpdatedAt"" TIMESTAMP WITH TIME ZONE;
             ALTER TABLE ""BranchLanguages"" ADD COLUMN IF NOT EXISTS ""SkillGeneratedAt"" TIMESTAMP WITH TIME ZONE;
             ALTER TABLE ""BranchLanguages"" ADD COLUMN IF NOT EXISTS ""SkillMarkdown"" TEXT;
+            ALTER TABLE ""BranchLanguages"" ADD COLUMN IF NOT EXISTS ""DeepScanProgressJson"" TEXT;
+            ALTER TABLE ""RepositoryBranches"" ADD COLUMN IF NOT EXISTS ""DeepScanPlanJson"" TEXT;
+            ALTER TABLE ""BranchGenerationTasks"" ADD COLUMN IF NOT EXISTS ""RequestedStopStatus"" INTEGER;
             ALTER TABLE ""ModelConfigs"" ADD COLUMN IF NOT EXISTS ""AiProviderId"" TEXT;
             ALTER TABLE ""ChatApps"" ADD COLUMN IF NOT EXISTS ""AiProviderId"" TEXT;
             ALTER TABLE ""AiModelConfigs"" ADD COLUMN IF NOT EXISTS ""ProviderType"" TEXT;

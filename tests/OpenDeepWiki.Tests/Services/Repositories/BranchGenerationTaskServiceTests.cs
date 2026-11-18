@@ -15,6 +15,60 @@ namespace OpenDeepWiki.Tests.Services.Repositories;
 public class BranchGenerationTaskServiceTests
 {
     [Fact]
+    public async Task EvaluationCanQueueWhileTheSameBranchHasAnActiveGeneration()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, RepositoryStatus.Completed);
+        var branch = SeedBranchWithDocument(context, repository.Id, "main");
+        await context.SaveChangesAsync();
+        var service = CreateService(context);
+        var generation = await service.EnqueueFullGenerationAsync(repository.Id, branch.BranchId);
+        var evaluation = await service.EnqueueScanPlanAsync(repository.Id, branch.BranchId);
+        Assert.True(generation.Success);
+        Assert.True(evaluation.Success);
+        Assert.NotEqual(generation.Task!.Id, evaluation.Task!.Id);
+        Assert.Equal(generation.Task.Id, (await context.RepositoryGenerationLocks.SingleAsync()).OwnerId);
+    }
+
+    [Fact]
+    public async Task ScanPlanRequestIsIdempotentAndLeavesPublishedDocumentsAndGenerationStatusAlone()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, RepositoryStatus.Completed);
+        var branch = SeedBranchWithDocument(context, repository.Id, "master");
+        await context.SaveChangesAsync();
+        var service = CreateService(context);
+
+        var first = await service.EnqueueScanPlanAsync(repository.Id, branch.BranchId);
+        var repeated = await service.EnqueueScanPlanAsync(repository.Id, branch.BranchId);
+        Assert.True(first.Success);
+        Assert.Equal(first.Task!.Id, repeated.Task?.Id);
+        Assert.Equal(BranchGenerationTaskMode.ScanPlan, first.Task.Mode);
+        Assert.Single(await context.DocFiles.ToListAsync());
+        Assert.Null((await context.RepositoryBranches.SingleAsync()).LastGenerationTaskId);
+    }
+
+    [Fact]
+    public async Task PauseDuringGenerationKeepsTheLeaseUntilTheWorkerStops()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, RepositoryStatus.Completed);
+        var branch = SeedBranchWithDocument(context, repository.Id, "master");
+        await context.SaveChangesAsync();
+        var service = CreateService(context);
+        var queued = await service.EnqueueFullGenerationAsync(repository.Id, branch.BranchId);
+        Assert.True(queued.Success);
+        queued.Task!.Status = BranchGenerationTaskStatus.Processing;
+        await context.SaveChangesAsync();
+
+        var result = await service.PauseAsync(queued.Task.Id);
+        Assert.True(result.Success);
+        Assert.Equal(BranchGenerationTaskStatus.Processing, result.Task!.Status);
+        Assert.Equal(BranchGenerationTaskStatus.Paused, result.Task.RequestedStopStatus);
+        Assert.Single(await context.RepositoryGenerationLocks.ToListAsync());
+    }
+
+    [Fact]
     public async Task BranchCleaner_CleansOnlyTargetBranch()
     {
         using var context = CreateContext();

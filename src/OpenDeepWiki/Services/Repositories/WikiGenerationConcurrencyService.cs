@@ -68,14 +68,15 @@ public sealed class WikiGenerationCoordinator(
         WikiGenerationWorkType workType,
         CancellationToken cancellationToken = default)
     {
-        var existingLock = await context.RepositoryGenerationLocks
+        bool planning = workType == WikiGenerationWorkType.ScanPlan;
+        var existingLock = planning ? null : await context.RepositoryGenerationLocks
             .AsNoTracking()
             .FirstOrDefaultAsync(item => item.RepositoryId == repositoryId && !item.IsDeleted, cancellationToken);
         var hadReservation = existingLock is not null &&
                              existingLock.OwnerType == ownerType &&
                              existingLock.OwnerId == ownerId;
 
-        var lockAcquired = await lockService.TryAcquireAsync(
+        var lockAcquired = planning || await lockService.TryAcquireAsync(
             context,
             repositoryId,
             ownerType,
@@ -92,6 +93,8 @@ public sealed class WikiGenerationCoordinator(
         var slot = await TryClaimSlotAsync(context, repositoryId, ownerId, workType, cancellationToken);
         if (slot is null)
         {
+            if (planning)
+                return (WikiGenerationAcquireStatus.ClusterFull, null);
             if (hadReservation)
             {
                 await lockService.UnbindAsync(context, repositoryId, ownerType, ownerId, cancellationToken);
@@ -134,7 +137,7 @@ public sealed class WikiGenerationCoordinator(
         if (EfContextCapabilities.SupportsExecuteUpdate(context))
         {
             await context.WikiGenerationSlots
-                .Where(item => item.Id == lease.SlotId && item.InstanceId == instanceId && !item.IsDeleted)
+                .Where(item => item.Id == lease.SlotId && item.OwnerId == lease.OwnerId && item.InstanceId == instanceId && !item.IsDeleted)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(item => item.HeartbeatAt, now)
@@ -162,7 +165,7 @@ public sealed class WikiGenerationCoordinator(
     {
         try
         {
-            await ClearSlotAsync(context, lease.SlotId, cancellationToken);
+            await ClearSlotAsync(context, lease, cancellationToken);
         }
         finally
         {
@@ -205,14 +208,15 @@ public sealed class WikiGenerationCoordinator(
         WikiGenerationWorkType workType,
         CancellationToken cancellationToken)
     {
-        await EnsureSlotsAsync(context, cancellationToken);
-
-        var max = wikiOptions.CurrentValue.GetMaxConcurrentGenerations();
+        var planning = workType == WikiGenerationWorkType.ScanPlan;
+        var first = planning ? WikiGeneratorOptions.MaxConcurrentGenerationsLimit : 0;
+        var end = planning ? first + 1 : wikiOptions.CurrentValue.GetMaxConcurrentGenerations();
+        await EnsureSlotsAsync(context, first, end, cancellationToken);
         var staleBefore = GetStaleBefore();
         var candidates = await context.WikiGenerationSlots
             .Where(item =>
                 !item.IsDeleted &&
-                item.SlotIndex < max &&
+                item.SlotIndex >= first && item.SlotIndex < end &&
                 (item.InstanceId == null || item.HeartbeatAt == null || item.HeartbeatAt < staleBefore))
             .OrderBy(item => item.SlotIndex)
             .ToListAsync(cancellationToken);
@@ -228,17 +232,16 @@ public sealed class WikiGenerationCoordinator(
         return null;
     }
 
-    private async Task EnsureSlotsAsync(IContext context, CancellationToken cancellationToken)
+    private static async Task EnsureSlotsAsync(IContext context, int first, int end, CancellationToken cancellationToken)
     {
-        var max = wikiOptions.CurrentValue.GetMaxConcurrentGenerations();
         var existingIndexes = await context.WikiGenerationSlots
-            .Where(item => !item.IsDeleted && item.SlotIndex < max)
+            .Where(item => !item.IsDeleted && item.SlotIndex >= first && item.SlotIndex < end)
             .Select(item => item.SlotIndex)
             .ToListAsync(cancellationToken);
 
         var existing = existingIndexes.ToHashSet();
         var added = false;
-        for (var index = 0; index < max; index++)
+        for (var index = first; index < end; index++)
         {
             if (existing.Contains(index))
             {
@@ -337,12 +340,12 @@ public sealed class WikiGenerationCoordinator(
         return true;
     }
 
-    private async Task ClearSlotAsync(IContext context, string slotId, CancellationToken cancellationToken)
+    private async Task ClearSlotAsync(IContext context, WikiGenerationWorkLease lease, CancellationToken cancellationToken)
     {
         if (EfContextCapabilities.SupportsExecuteUpdate(context))
         {
             await context.WikiGenerationSlots
-                .Where(item => item.Id == slotId && !item.IsDeleted)
+                .Where(item => item.Id == lease.SlotId && item.OwnerId == lease.OwnerId && item.InstanceId == instanceIdentity.InstanceId && !item.IsDeleted)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(item => item.InstanceId, (string?)null)
@@ -357,7 +360,7 @@ public sealed class WikiGenerationCoordinator(
         }
 
         var slot = await context.WikiGenerationSlots
-            .FirstOrDefaultAsync(item => item.Id == slotId && !item.IsDeleted, cancellationToken);
+            .FirstOrDefaultAsync(item => item.Id == lease.SlotId && item.OwnerId == lease.OwnerId && item.InstanceId == instanceIdentity.InstanceId && !item.IsDeleted, cancellationToken);
         if (slot is null)
         {
             return;

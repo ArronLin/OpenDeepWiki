@@ -66,6 +66,5 @@ public sealed class BranchFullGenerationCleaner : IBranchFullGenerationCleaner
         branch.LastGenerationStartedAt = null;
         branch.LastGenerationCompletedAt = null;
         branch.UpdateTimestamp();
-        context.RepositoryBranches.Update(branch);
     }
 }
