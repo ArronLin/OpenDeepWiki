@@ -26,6 +26,7 @@ public sealed class ScanModuleCheckpointTests
     public async Task RetryUsesValidatedModulesAndGenerationReadsTheirVersionedEvidence()
     {
         var calls = new ConcurrentQueue<string>();
+        var generationCalls = new ConcurrentQueue<(string Root, string? PreviousDraft, string? Question)>();
         var failBeta = true;
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -45,6 +46,9 @@ public sealed class ScanModuleCheckpointTests
             }
             else
             {
+                generationCalls.Enqueue((payload.GetProperty("root").GetString()!,
+                    payload.GetProperty("previousDraft").GetString(),
+                    payload.GetProperty("questions")[0].GetString()));
                 var source = payload.GetProperty("sources")[0];
                 var path = source.GetProperty("evidence").GetProperty("path").GetString();
                 reply = JsonSerializer.Serialize(new { markdown = path + " " + source.GetProperty("content").GetString(), unansweredQuestions = Array.Empty<string>() });
@@ -95,6 +99,32 @@ public sealed class ScanModuleCheckpointTests
             var docs = await context.DocFiles.ToListAsync();
             Assert.Equal(2, docs.Count);
             Assert.All(docs, doc => Assert.Contains("version-one-evidence", doc.Content));
+
+            // Resume with one draft containing gaps and one missing page.
+            var progress = DeepRepositoryScan.ReadProgress(language.DeepScanProgressJson)!;
+            var alpha = progress.Batches.Single(batch => batch.Module == "alpha");
+            var beta = progress.Batches.Single(batch => batch.Module == "beta");
+            var alphaId = (await context.DocCatalogs.SingleAsync(row => row.Path == alpha.Page)).DocFileId;
+            var betaCatalog = await context.DocCatalogs.SingleAsync(row => row.Path == beta.Page);
+            betaCatalog.DocFileId = null;
+            progress.Batches.Clear();
+            progress.Batches.Add(alpha with { Gaps = ["specific gap"] });
+            language.DeepScanProgressJson = JsonSerializer.Serialize(progress, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await context.SaveChangesAsync();
+            generationCalls.Clear();
+
+            await scan.GenerateAsync(workspace, language, plan, default);
+
+            Assert.Collection(generationCalls,
+                first => Assert.Equal(("beta", null, "entry?"), first),
+                second =>
+                {
+                    Assert.Equal("alpha", second.Root);
+                    Assert.Contains("version-one-evidence", second.PreviousDraft);
+                    Assert.Equal("specific gap", second.Question);
+                });
+            Assert.Equal(alphaId, (await context.DocCatalogs.SingleAsync(row => row.Path == alpha.Page)).DocFileId);
+            Assert.NotNull(betaCatalog.DocFileId);
 
             workspace.CommitId = "version-two";
             calls.Clear();

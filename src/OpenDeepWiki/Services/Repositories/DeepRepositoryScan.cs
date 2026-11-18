@@ -21,7 +21,7 @@ public sealed record DeepScanPlan(string Id, string Commit, string Source, strin
     string? CheckpointVersion = null, int ReusedModules = 0);
 public sealed record ScanEvidence(string Path, int StartLine, int EndLine, string Commit);
 public sealed record ScanBatchResult(string Module, string Page, ScanEvidence[] Reads, string[] Gaps, long Tokens,
-    string[]? CitedFiles = null);
+    string[]? CitedFiles = null, bool GapFollowUpAttempted = false);
 public sealed record DeepScanProgress(string PlanId, string Commit, DateTime StartedAt,
     List<ScanBatchResult> Batches, DateTime? FinishedAt = null);
 
@@ -247,33 +247,66 @@ public sealed class DeepRepositoryScan(
             progress = new DeepScanProgress(plan.Id, plan.Commit, DateTime.UtcNow, []);
         var catalogs = await context.DocCatalogs.Where(item => item.BranchLanguageId == language.Id && !item.IsDeleted)
             .ToListAsync(ct);
-        var finishedPages = progress.Batches.Where(item => item.Gaps.Length == 0).Select(item => item.Page)
-            .Where(path => catalogs.Any(row => row.Path == path && row.DocFileId != null))
-            .ToHashSet(StringComparer.Ordinal);
+        var savedPages = (await (from catalog in context.DocCatalogs
+                                 join document in context.DocFiles on catalog.DocFileId equals document.Id
+                                 where catalog.BranchLanguageId == language.Id && !catalog.IsDeleted && !document.IsDeleted
+                                 select catalog.Path).ToListAsync(ct)).ToHashSet(StringComparer.Ordinal);
+        savedPages.IntersectWith(progress.Batches.Select(item => item.Page));
+        var pendingGaps = progress.Batches.Where(item => savedPages.Contains(item.Page) &&
+            item.Gaps.Length > 0 && !item.GapFollowUpAttempted)
+            .ToDictionary(item => item.Page, StringComparer.Ordinal);
         var size = Math.Clamp(settings.MaxDocumentSourceToolCalls, 1, 8);
         using var persist = new SemaphoreSlim(1);
         var assignments = plan.Modules.SelectMany((module, index) =>
-            module.RequiredFiles.Chunk(size).Select((files, batchIndex) =>
-                (Module: module, ModuleOrder: index + 1, Files: files, BatchIndex: batchIndex + 1)));
-        await Parallel.ForEachAsync(assignments, new ParallelOptions
+        {
+            var modulePath = "scan-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(module.Root)))[..16].ToLowerInvariant();
+            return module.RequiredFiles.Chunk(size).Select((files, batchIndex) =>
+                new ScanAssignment(module, index + 1, files, batchIndex + 1, modulePath));
+        }).ToArray();
+        var concurrency = new ParallelOptions
         {
             MaxDegreeOfParallelism = Math.Clamp(settings.ParallelCount, 1, 12),
             CancellationToken = ct
-        }, async (entry, batchToken) =>
+        };
+        await Parallel.ForEachAsync(assignments.Where(entry => !savedPages.Contains(entry.Page)), concurrency,
+            (entry, token) => GenerateBatchAsync(entry, null, token));
+        if (progress.Batches.Any(item => item.Gaps.Contains("模型未生成有效文档")))
+            throw new InvalidOperationException("深度扫描有未生成的批次，请查看扫描进度并重试");
+        await Parallel.ForEachAsync(assignments.Where(entry => pendingGaps.ContainsKey(entry.Page)), concurrency,
+            (entry, token) => GenerateBatchAsync(entry, pendingGaps[entry.Page], token));
+
+        language.DeepScanProgressJson = JsonSerializer.Serialize(progress with { FinishedAt = DateTime.UtcNow }, Json);
+        await context.SaveChangesAsync(ct);
+
+        async ValueTask GenerateBatchAsync(ScanAssignment entry, ScanBatchResult? previous, CancellationToken batchToken)
         {
             var module = entry.Module;
             var batch = entry.Files;
             var batchIndex = entry.BatchIndex;
-            var modulePath = "scan-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(module.Root)))[..16].ToLowerInvariant();
-            var page = modulePath + "/" + batchIndex;
-            if (finishedPages.Contains(page))
-                return;
+            var modulePath = entry.ModulePath;
+            var page = entry.Page;
+            string? previousDraft = null;
+            if (previous is not null)
+            {
+                // The shared EF context must not be read while another batch is saving.
+                await persist.WaitAsync(batchToken);
+                try
+                {
+                    var documentId = catalogs.Single(row => row.Path == page).DocFileId;
+                    var existing = await context.DocFiles.FindAsync([documentId], batchToken);
+                    previousDraft = existing?.Content?.Split("\n\n### Source evidence\n\n", 2)[0];
+                }
+                finally { persist.Release(); }
+                if (previousDraft is null) return;
+            }
 
-            var excerpts = await ReadExcerptsAsync(workspace, batch, 3_200, batchToken, sourceCache);
+            var evidencePaths = batch.Concat(previous?.Reads.Select(read => read.Path) ?? [])
+                .Distinct(StringComparer.Ordinal);
+            var excerpts = await ReadExcerptsAsync(workspace, evidencePaths, 3_200, batchToken, sourceCache);
             var missing = batch.Except(excerpts.Select(item => item.Evidence.Path), StringComparer.Ordinal).ToList();
             var tokens = 0L;
             ModuleDocument? document = null;
-            string[] unanswered = module.Questions;
+            string[] unanswered = previous?.Gaps ?? module.Questions;
             var batchFolders = batch.Select(Path.GetDirectoryName).ToHashSet(StringComparer.Ordinal);
             var additional = module.Files.Except(module.RequiredFiles, StringComparer.Ordinal)
                 .Where(path => batchFolders.Contains(Path.GetDirectoryName(path))).Take(4).ToArray();
@@ -292,9 +325,9 @@ public sealed class DeepRepositoryScan(
                     var payload = JsonSerializer.Serialize(new
                     {
                         language.LanguageCode, module.Title, module.Root, module.Topics, module.Dependencies,
-                        questions = module.Questions,
+                        questions = previous?.Gaps ?? module.Questions,
                         supplementalQuestions = unanswered,
-                        previousDraft = document?.Markdown,
+                        previousDraft = document?.Markdown ?? previousDraft,
                         sources = excerpts.Select(item => new { item.Evidence, item.Content })
                     }, Json);
                     var answer = await AskAsync(model, workspace, repositoryId, "wiki_scan_document",
@@ -327,6 +360,16 @@ public sealed class DeepRepositoryScan(
             await persist.WaitAsync(batchToken);
             try
             {
+                if (previous is not null && (document is null || missing.Concat(unanswered)
+                        .Distinct(StringComparer.Ordinal).Count() >= previous.Gaps.Length))
+                {
+                    if (document is null) return;
+                    progress.Batches.RemoveAll(item => item.Page == page);
+                    progress.Batches.Add(previous with { GapFollowUpAttempted = true, Tokens = previous.Tokens + tokens });
+                    language.DeepScanProgressJson = JsonSerializer.Serialize(progress, Json);
+                    await context.SaveChangesAsync(batchToken);
+                    return;
+                }
                 if (document is not null && !string.IsNullOrWhiteSpace(document.Markdown) && document.UnansweredQuestions is not null)
                 {
                     var parent = GetCatalog(catalogs, language.Id, modulePath, module.Title, entry.ModuleOrder, null);
@@ -350,7 +393,8 @@ public sealed class DeepRepositoryScan(
                 }
                 progress.Batches.RemoveAll(item => item.Page == page);
                 progress.Batches.Add(new ScanBatchResult(module.Root, page, evidence,
-                    missing.Concat(unanswered).Distinct().ToArray(), tokens, cited));
+                    missing.Concat(unanswered).Distinct().ToArray(), (previous?.Tokens ?? 0) + tokens, cited,
+                    GapFollowUpAttempted: previous is not null));
                 language.DeepScanProgressJson = JsonSerializer.Serialize(progress, Json);
                 await context.SaveChangesAsync(batchToken);
             }
@@ -360,11 +404,12 @@ public sealed class DeepRepositoryScan(
             }
             logger.LogInformation("Deep scan branch {Branch}, module {Module}, batch {Batch}: {Read} reads and {Gaps} gaps",
                 workspace.BranchName, module.Root, batchIndex, evidence.Length, missing.Count + unanswered.Length);
-        });
-        language.DeepScanProgressJson = JsonSerializer.Serialize(progress with { FinishedAt = DateTime.UtcNow }, Json);
-        await context.SaveChangesAsync(ct);
-        if (progress.Batches.Any(item => item.Gaps.Contains("模型未生成有效文档")))
-            throw new InvalidOperationException("深度扫描有未生成的批次，请查看扫描进度并重试");
+        }
+    }
+
+    private sealed record ScanAssignment(ScanModule Module, int ModuleOrder, string[] Files, int BatchIndex, string ModulePath)
+    {
+        public string Page => ModulePath + "/" + BatchIndex;
     }
 
     private DocCatalog GetCatalog(List<DocCatalog> catalogs, string languageId, string path, string title, int order, string? parent)
