@@ -42,6 +42,12 @@ public class RepositoryAnalyzerOptions
     public string[] AllowedLocalPathRoots { get; set; } = [];
 
     /// <summary>
+    /// Existing host-to-container mounts used to translate user-entered local paths.
+    /// Resolved paths must still be inside AllowedLocalPathRoots.
+    /// </summary>
+    public LocalPathMapping[] LocalPathMappings { get; set; } = [];
+
+    /// <summary>
     /// Local directory import mode.
     /// </summary>
     public LocalDirectoryImportMode LocalDirectoryImportMode { get; set; } = LocalDirectoryImportMode.Copy;

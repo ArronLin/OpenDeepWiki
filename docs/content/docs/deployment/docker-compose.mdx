@@ -171,6 +171,35 @@ services:
   在生产环境中始终更改 `JWT_SECRET_KEY`。默认密钥仅用于开发。
 </Callout>
 
+## 本机路径自动映射
+
+Docker 部署时，“服务器本地目录”支持直接填写宿主机绝对路径，例如 `D:\repos\OpenDeepWiki`。
+管理员须配置实际挂载及对应的 `LocalPathMappings`。后端会自动转换路径，按容器路径检查白名单和目录是否存在，并保存转换后的路径供后台任务使用。
+
+在 `compose.override.yaml` 中配置以下内容（示例将 Windows 的 `D:/repos` 挂载到容器 `/mnt/repos`）：
+
+```yaml
+services:
+  opendeepwiki:
+    environment:
+      RepositoryAnalyzer__AllowedLocalPathRoots__0: /mnt/repos
+      RepositoryAnalyzer__LocalPathMappings__0__HostPath: D:/repos
+      RepositoryAnalyzer__LocalPathMappings__0__ContainerPath: /mnt/repos
+    volumes:
+      - type: bind
+        source: D:/repos
+        target: /mnt/repos
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+运行 `docker compose up -d opendeepwiki` 使配置生效。之后可直接输入 `D:\repos\OpenDeepWiki` 或 `D:/repos/OpenDeepWiki`，不必手动改写路径。
+
+每增加一个宿主机目录根路径，需增加相应挂载、白名单项和映射（将配置索引 `0` 改为 `1`、`2` 等）。重叠映射优先使用更具体的根目录，支持 UNC 共享路径、空格和中文目录。系统只转换已配置的路径，不会自动挂载任意磁盘。未映射路径、越过白名单或不存在的目录会返回明确错误。容器原生路径和 Windows 原生部署仍可直接使用。
+
+登录后，在仓库提交表单中选择“服务器本地目录”，点击“浏览”可从导入白名单逐级选取文件夹。管理员可在同一表单编辑白名单，每行一个绝对路径。修改存入数据库并立即生效。部署配置的白名单是可编辑范围的上限，清空列表可暂停新的本地目录导入。
+
 ## 数据持久化
 
 后端将所有数据存储在映射到 `./data` 的 Docker 卷中：

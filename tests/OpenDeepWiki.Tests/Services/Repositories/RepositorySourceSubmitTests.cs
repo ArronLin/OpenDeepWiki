@@ -8,6 +8,7 @@ using Moq;
 using OpenDeepWiki.Cache.Memory;
 using OpenDeepWiki.EFCore;
 using OpenDeepWiki.Entities;
+using OpenDeepWiki.Endpoints;
 using OpenDeepWiki.Models;
 using OpenDeepWiki.Models.Admin;
 using OpenDeepWiki.Services.Admin;
@@ -22,6 +23,113 @@ namespace OpenDeepWiki.Tests.Services.Repositories;
 
 public class RepositorySourceSubmitTests
 {
+    [Fact]
+    public async Task LocalAllowlist_PersistsEditsAndAppliesThemToSubmission()
+    {
+        using var context = CreateContext();
+        var root = CreateTempDirectory();
+        var selected = Directory.CreateDirectory(Path.Combine(root, "SampleRepo")).FullName;
+        var options = new RepositoryAnalyzerOptions
+        {
+            AllowedLocalPathRoots = [root],
+            LocalPathMappings = [new() { HostPath = @"D:\Repos", ContainerPath = root }]
+        };
+        var access = new LocalDirectoryAccess(context, Options.Create(options));
+        Assert.Equal(root, Assert.Single(await access.GetRootsAsync()));
+        await access.ReplaceRootsAsync([@"D:\Repos\SampleRepo"]);
+        var refreshed = new LocalDirectoryAccess(context, Options.Create(options));
+        Assert.Equal(selected, Assert.Single(await refreshed.GetRootsAsync()));
+        Assert.Equal(@"D:\Repos\SampleRepo", refreshed.DisplayPath(selected));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => refreshed.ReplaceRootsAsync([CreateTempDirectory()]));
+
+        var service = CreateService(context, options);
+        var request = new LocalDirectoryRepositorySubmitRequest
+        {
+            LocalPath = root, OrgName = "example", RepoName = "SampleRepo", LanguageCode = "zh"
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SubmitLocalDirectoryAsync(request));
+        request.LocalPath = @"D:\Repos\SampleRepo";
+        await service.SubmitLocalDirectoryAsync(request);
+
+        await refreshed.ReplaceRootsAsync([]);
+        Assert.Empty(await access.GetRootsAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => refreshed.ResolveAllowedAsync(selected));
+    }
+
+    [Fact]
+    public async Task SubmitLocalDirectoryAsync_MapsHostPathAndKeepsPrivateRepositoryWithoutCredentials()
+    {
+        using var context = CreateContext();
+        var root = CreateTempDirectory();
+        var directory = Directory.CreateDirectory(Path.Combine(root, "SampleRepo")).FullName;
+        var service = CreateService(context, new RepositoryAnalyzerOptions
+        {
+            AllowedLocalPathRoots = [root],
+            LocalPathMappings = [new() { HostPath = @"D:\Repos", ContainerPath = root }]
+        });
+        var request = new LocalDirectoryRepositorySubmitRequest
+        {
+            LocalPath = @"D:\Repos\SampleRepo", OrgName = "example", RepoName = "SampleRepo",
+            BranchName = "customization", LanguageCode = "zh", IsPublic = false
+        };
+
+        var repository = await service.SubmitLocalDirectoryAsync(request);
+
+        Assert.Equal(directory, RepositorySource.Parse(repository.GitUrl).Location);
+        Assert.False(repository.IsPublic);
+        Assert.Null(repository.AuthAccount);
+        Assert.Null(repository.AuthPassword);
+        // Both path spellings identify the same repository and must not create duplicates.
+        request.LocalPath = directory;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SubmitLocalDirectoryAsync(request));
+        Assert.Single(await context.Repositories.ToListAsync());
+    }
+
+    [Fact]
+    public async Task SubmitLocalDirectoryEndpoint_MissingDirectoryReturnsActionableJsonError()
+    {
+        using var context = CreateContext();
+        var root = CreateTempDirectory();
+        var service = CreateService(context, new RepositoryAnalyzerOptions
+        {
+            AllowedLocalPathRoots = [root],
+            LocalPathMappings = [new() { HostPath = @"D:\Repos", ContainerPath = root }]
+        });
+
+        var result = await RepositoryLocalDirectoryEndpoints.SubmitAsync(new()
+        {
+            LocalPath = @"D:\Repos\missing", OrgName = "example", RepoName = "missing", LanguageCode = "zh"
+        }, service);
+
+        Assert.Equal(400, Assert.IsAssignableFrom<IStatusCodeHttpResult>(result).StatusCode);
+        var payload = System.Text.Json.JsonSerializer.Serialize(Assert.IsAssignableFrom<IValueHttpResult>(result).Value);
+        Assert.Contains("message", payload);
+        Assert.Contains("找不到该目录", System.Text.Json.JsonDocument.Parse(payload).RootElement.GetProperty("message").GetString());
+        Assert.Empty(await context.Repositories.ToListAsync());
+    }
+
+    [Fact]
+    public async Task SubmitLocalDirectoryEndpoint_MappingDoesNotBypassAllowlist()
+    {
+        using var context = CreateContext();
+        var mappedRoot = CreateTempDirectory();
+        Directory.CreateDirectory(Path.Combine(mappedRoot, "SampleRepo"));
+        var service = CreateService(context, new RepositoryAnalyzerOptions
+        {
+            AllowedLocalPathRoots = [CreateTempDirectory()],
+            LocalPathMappings = [new() { HostPath = @"D:\Repos", ContainerPath = mappedRoot }]
+        });
+        var result = await RepositoryLocalDirectoryEndpoints.SubmitAsync(new()
+        {
+            LocalPath = @"D:\Repos\SampleRepo", OrgName = "example", RepoName = "SampleRepo", LanguageCode = "zh"
+        }, service);
+
+        Assert.Equal(400, Assert.IsAssignableFrom<IStatusCodeHttpResult>(result).StatusCode);
+        var payload = System.Text.Json.JsonSerializer.Serialize(Assert.IsAssignableFrom<IValueHttpResult>(result).Value);
+        Assert.Contains("白名单", System.Text.Json.JsonDocument.Parse(payload).RootElement.GetProperty("message").GetString());
+        Assert.Empty(await context.Repositories.ToListAsync());
+    }
+
     [Fact]
     public async Task SubmitLocalDirectoryAsync_ShouldRejectPathsOutsideAllowedRoots()
     {

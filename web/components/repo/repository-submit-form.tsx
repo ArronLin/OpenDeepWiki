@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { defaultWikiLanguage, wikiLanguageCodes } from "@/i18n/config";
+import { LocalDirectoryPicker } from "./local-directory-picker";
 
 interface RepositorySubmitFormProps {
   onSuccess?: () => void;
@@ -353,6 +354,7 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
           : t("home.repository.submitError");
       toast.error(message || t("home.repository.submitError"));
       if (sourceType === "Documentation") setErrors({ archive: message });
+      if (sourceType === "LocalDirectory") setErrors({ localPath: message });
       console.error("Failed to submit repository:", error);
     } finally {
       setIsSubmitting(false);
@@ -450,11 +452,12 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
 
       {sourceType === "LocalDirectory" && (
         <div className="space-y-2">
-          <label className="flex items-center gap-2 text-sm font-medium">
+          <label htmlFor="repository-local-path" className="flex items-center gap-2 text-sm font-medium">
             <FolderOpen className="h-4 w-4 text-muted-foreground" />
             {t("home.repository.localPath")}
           </label>
           <Input
+            id="repository-local-path"
             value={localPath}
             onChange={(event) => setLocalPath(event.target.value)}
             placeholder={t("home.repository.localPathPlaceholder")}
@@ -462,7 +465,11 @@ export function RepositorySubmitForm({ onSuccess }: RepositorySubmitFormProps) {
             className="h-11 border-transparent bg-secondary/50 transition-colors focus:border-primary/50"
           />
           <p className="text-xs text-muted-foreground">{t("home.repository.localPathHint")}</p>
-          {errors.localPath && <p className="text-sm text-destructive">{errors.localPath}</p>}
+          <LocalDirectoryPicker value={localPath} onSelect={(path) => {
+            setLocalPath(path);
+            setErrors((current) => ({ ...current, localPath: "" }));
+          }} />
+          {errors.localPath && <p role="alert" className="text-sm text-destructive">{errors.localPath}</p>}
         </div>
       )}
 

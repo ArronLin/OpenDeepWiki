@@ -261,6 +261,7 @@ try
     builder.Services.AddScoped<IAdminDepartmentService, AdminDepartmentService>();
     builder.Services.AddScoped<IAdminToolsService, AdminToolsService>();
     builder.Services.AddScoped<IAdminSettingsService, AdminSettingsService>();
+    builder.Services.AddScoped<LocalDirectoryAccess>();
     builder.Services.AddScoped<IAdminChatAssistantService, AdminChatAssistantService>();
     builder.Services.AddScoped<IAdminApiKeyService, AdminApiKeyService>();
     builder.Services.AddScoped<IOrganizationService, OrganizationService>();
@@ -424,6 +425,7 @@ try
 
     app.MapMiniApis();
     app.MapRepositoryUploadEndpoints();
+    app.MapRepositoryLocalDirectoryEndpoints();
     app.MapAuthEndpoints();
     app.MapApiKeyEndpoints();
     app.MapOAuthEndpoints();

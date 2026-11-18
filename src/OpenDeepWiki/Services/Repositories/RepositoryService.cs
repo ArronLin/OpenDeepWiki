@@ -151,18 +151,11 @@ public class RepositoryService(
             0);
     }
 
-    [HttpPost("/submit-local")]
-    public async Task<Repository> SubmitLocalDirectoryAsync([FromBody] LocalDirectoryRepositorySubmitRequest request)
+    // Mapped in RepositoryLocalDirectoryEndpoints so validation errors are returned as JSON.
+    public async Task<Repository> SubmitLocalDirectoryAsync(LocalDirectoryRepositorySubmitRequest request)
     {
         var currentUserId = GetCurrentUserId();
-        var normalizedPath = NormalizeLocalDirectoryPath(request.LocalPath);
-
-        if (!Directory.Exists(normalizedPath))
-        {
-            throw new DirectoryNotFoundException("本地目录不存在");
-        }
-
-        EnsureLocalPathAllowed(normalizedPath);
+        var normalizedPath = await new LocalDirectoryAccess(context, repositoryOptions).ResolveAllowedAsync(request.LocalPath);
 
         return await CreateRepositoryAsync(
             currentUserId,
@@ -846,32 +839,4 @@ public class RepositoryService(
         return string.IsNullOrWhiteSpace(branchName) ? "main" : branchName.Trim();
     }
 
-    private static string NormalizeLocalDirectoryPath(string path)
-    {
-        return Path.GetFullPath(path.Trim());
-    }
-
-    private void EnsureLocalPathAllowed(string fullPath)
-    {
-        var allowedRoots = repositoryOptions.Value.AllowedLocalPathRoots
-            .Where(root => !string.IsNullOrWhiteSpace(root))
-            .Select(root => Path.GetFullPath(root.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-            .ToList();
-
-        if (allowedRoots.Count == 0)
-        {
-            throw new InvalidOperationException("当前未配置允许导入的本地目录根路径");
-        }
-
-        var normalizedPath = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var isAllowed = allowedRoots.Any(root =>
-            normalizedPath.Equals(root, StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.StartsWith(root + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
-
-        if (!isAllowed)
-        {
-            throw new InvalidOperationException("本地目录不在允许导入的白名单范围内");
-        }
-    }
 }

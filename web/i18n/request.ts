@@ -14,7 +14,12 @@ async function loadMessages(locale: Locale) {
   const sidebar = (await import(`./messages/${locale}/sidebar.json`)).default;
   const auth = (await import(`./messages/${locale}/auth.json`)).default;
   const authUi = (await import(`./messages/${locale}/auth-ui.json`)).default;
-  const home = (await import(`./messages/${locale}/home.json`)).default;
+  const localizedHome = (await import(`./messages/${locale}/home.json`)).default;
+  const englishHome = (await import("./messages/en/home.json")).default;
+  const home = {
+    ...localizedHome,
+    repository: { ...englishHome.repository, ...localizedHome.repository },
+  };
   const ui = (await import(`./messages/${locale}/ui.json`)).default;
   const recommend = (await import(`./messages/${locale}/recommend.json`)).default;
   const mindmap = (await import(`./messages/${locale}/mindmap.json`)).default;
