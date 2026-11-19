@@ -16,6 +16,7 @@ public sealed class DeepRepositoryScanTests
             Directory.CreateDirectory(Path.Combine(root.FullName, "mod"));
             foreach (var path in new[] { "mod/main.cs", "mod/generated.cs", "mod/logo.png", "mod/private.pem" })
                 File.WriteAllText(Path.Combine(root.FullName, path), "fixture");
+            File.WriteAllText(Path.Combine(root.FullName, "mod/empty.txt"), "");
             LibGit2Sharp.Commands.Stage(git, "*");
             var ignores = Path.Combine(root.FullName, "mod", ".gitignore");
             File.WriteAllText(ignores, "generated.cs");
@@ -28,7 +29,9 @@ public sealed class DeepRepositoryScanTests
             {
                 WorkingDirectory = root.FullName, GitObjectDirectory = root.FullName, CommitId = commit.Sha
             };
-            Assert.Equal(new[] { "mod/main.cs" }, DeepRepositoryScan.InventoryCommit(snapshot, default).Files);
+            var inventory = DeepRepositoryScan.InventoryCommit(snapshot, default);
+            Assert.Equal(new[] { "mod/main.cs" }, inventory.Files);
+            Assert.Equal(1, inventory.Excluded["empty"]);
         }
         finally
         {
@@ -81,8 +84,10 @@ public sealed class DeepRepositoryScanTests
                 File.WriteAllText(path, "fixture");
             }
 
+            File.WriteAllText(Path.Combine(root.FullName, "empty.txt"), "");
             var result = DeepRepositoryScan.Inventory(root.FullName, CancellationToken.None);
             Assert.Equal(new[] { files[1], files[0], files[2] }, result.Files);
+            Assert.Equal(1, result.Excluded["empty"]);
             Assert.Equal(2, result.Excluded["credentials"]);
             Assert.Equal(1, result.Excluded["dependencies-or-generated"]);
             Assert.Equal(1, result.Excluded["binary-or-generated"]);

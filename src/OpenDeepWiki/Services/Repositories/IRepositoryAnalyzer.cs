@@ -10,6 +10,8 @@ public interface IRepositoryAnalyzer
 {
     Task<RepositoryWorkspace> PreparePlanningWorkspaceAsync(Repository repository, string branchName, CancellationToken cancellationToken);
 
+    RepositoryWorkspace? FindSavedGitWorkspace(Repository repository, string branchName, string commitId);
+
     /// <summary>
     /// Gets the latest remote HEAD commit ID for a branch without updating the local workspace.
     /// Returns null when the repository source does not support remote refs or the branch ref is absent.

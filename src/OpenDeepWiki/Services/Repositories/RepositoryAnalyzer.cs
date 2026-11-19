@@ -169,30 +169,33 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     public async Task<RepositoryWorkspace> PreparePlanningWorkspaceAsync(Entities.Repository repository,
         string branchName, CancellationToken cancellationToken)
     {
-        var source = RepositorySource.Parse(repository.GitUrl);
-        if (source.SourceType is RepositorySourceType.LocalDirectory or RepositorySourceType.Git)
-        {
-            var checkout = GetWorkingDirectory(repository.OrgName, repository.RepoName, branchName);
-            var head = await GetRemoteBranchHeadCommitAsync(repository, branchName, cancellationToken);
-            if (head is not null)
-            {
-                var stores = source.SourceType == RepositorySourceType.LocalDirectory
-                    ? new[] { checkout, source.Location } : new[] { checkout };
-                foreach (var store in stores)
-                {
-                    if (!GitRepository.IsValid(store)) continue;
-                    using var git = new GitRepository(store);
-                    if (git.Lookup<Commit>(head) is null) continue;
-                    return new RepositoryWorkspace
-                    {
-                        WorkingDirectory = store, GitObjectDirectory = store, CommitId = head,
-                        Organization = repository.OrgName, RepositoryName = repository.RepoName,
-                        SourceType = source.SourceType, SourceLocation = source.Location, BranchName = branchName
-                    };
-                }
-            }
-        }
+        var head = await GetRemoteBranchHeadCommitAsync(repository, branchName, cancellationToken);
+        if (head is not null && FindSavedGitWorkspace(repository, branchName, head) is { } saved)
+            return saved;
         return await PrepareWorkspaceCoreAsync(repository, branchName, null, true, cancellationToken);
+    }
+
+    public RepositoryWorkspace? FindSavedGitWorkspace(Entities.Repository repository, string branchName, string commitId)
+    {
+        var source = RepositorySource.Parse(repository.GitUrl);
+        if (source.SourceType is not (RepositorySourceType.LocalDirectory or RepositorySourceType.Git))
+            return null;
+        var checkout = GetWorkingDirectory(repository.OrgName, repository.RepoName, branchName);
+        var stores = source.SourceType == RepositorySourceType.LocalDirectory
+            ? new[] { checkout, source.Location } : new[] { checkout };
+        foreach (var store in stores)
+        {
+            if (!GitRepository.IsValid(store)) continue;
+            using var git = new GitRepository(store);
+            if (git.Lookup<Commit>(commitId) is null) continue;
+            return new RepositoryWorkspace
+            {
+                WorkingDirectory = store, GitObjectDirectory = store, CommitId = commitId,
+                Organization = repository.OrgName, RepositoryName = repository.RepoName,
+                SourceType = source.SourceType, SourceLocation = source.Location, BranchName = branchName
+            };
+        }
+        return null;
     }
 
     private async Task<RepositoryWorkspace> PrepareWorkspaceCoreAsync(Entities.Repository repository,

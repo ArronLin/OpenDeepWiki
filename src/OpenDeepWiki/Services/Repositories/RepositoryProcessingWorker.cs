@@ -457,12 +457,26 @@ public class RepositoryProcessingWorker(
                 $"Preparing workspace, branch: {branch.BranchName}", cancellationToken: stoppingToken);
         }
 
-        // Prepare workspace with previous commit ID for incremental updates
-        var workspace = await repositoryAnalyzer.PrepareWorkspaceAsync(
-            repository,
-            branch.BranchName,
-            branch.LastCommitId,
-            stoppingToken);
+        var retryPlan = DeepRepositoryScan.ReadPlan(branch.DeepScanPlanJson);
+        var retryCommit = false;
+        if (retryPlan is not null)
+        {
+            var existingProgress = await (from language in context.BranchLanguages
+                                          where language.RepositoryBranchId == branch.Id && !language.IsDeleted &&
+                                              context.DocCatalogs.Any(page => page.BranchLanguageId == language.Id &&
+                                                  !page.IsDeleted && page.DocFileId != null)
+                                          select language.DeepScanProgressJson).ToListAsync(stoppingToken);
+            retryCommit = existingProgress.Any(json => DeepRepositoryScan.HasFailedBatches(
+                DeepRepositoryScan.ReadProgress(json), retryPlan));
+        }
+        var savedWorkspace = retryCommit
+            ? repositoryAnalyzer.FindSavedGitWorkspace(repository, branch.BranchName, retryPlan!.Commit)
+            : null;
+        var workspace = savedWorkspace ?? await repositoryAnalyzer.PrepareWorkspaceAsync(
+            repository, branch.BranchName, branch.LastCommitId, stoppingToken);
+        if (retryCommit && workspace.CommitId != retryPlan!.Commit)
+            throw new InvalidOperationException($"找不到断点续跑所需的源码版本 {retryPlan.Commit}，已保留生成进度");
+        if (retryCommit) workspace.GenerationPlan = retryPlan;
 
         logger.LogDebug(
             "Workspace prepared. WorkingDirectory: {WorkingDirectory}, CurrentCommit: {CurrentCommit}, PreviousCommit: {PreviousCommit}, IsIncremental: {IsIncremental}",

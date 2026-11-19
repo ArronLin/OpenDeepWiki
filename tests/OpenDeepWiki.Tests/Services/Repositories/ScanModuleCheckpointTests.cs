@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -28,6 +30,7 @@ public sealed class ScanModuleCheckpointTests
         var calls = new ConcurrentQueue<string>();
         var generationCalls = new ConcurrentQueue<(string Root, string? PreviousDraft, string? Question)>();
         var failBeta = true;
+        var truncateBetaReply = false;
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         await using var server = builder.Build();
@@ -51,7 +54,17 @@ public sealed class ScanModuleCheckpointTests
                     payload.GetProperty("questions")[0].GetString()));
                 var source = payload.GetProperty("sources")[0];
                 var path = source.GetProperty("evidence").GetProperty("path").GetString();
-                reply = JsonSerializer.Serialize(new { markdown = path + " " + source.GetProperty("content").GetString(), unansweredQuestions = Array.Empty<string>() });
+                var markdown = path + " " + source.GetProperty("content").GetString();
+                var expectsMarkdown = body.RootElement.GetProperty("messages")[0].GetRawText()
+                    .Contains("END OF WIKI PAGE", StringComparison.Ordinal);
+                if (payload.GetProperty("root").GetString() == "beta" && truncateBetaReply)
+                {
+                    truncateBetaReply = false;
+                    reply = """{"markdown":"unfinished""";
+                }
+                else reply = expectsMarkdown
+                    ? "# Recovered page\n\n" + markdown + "\n" + DeepRepositoryScan.PageEndMarker
+                    : JsonSerializer.Serialize(new { markdown, unansweredQuestions = Array.Empty<string>() });
             }
             var chunk = JsonSerializer.Serialize(new { id = "chatcmpl-test", created = 1, model = "test",
                 choices = new[] { new { index = 0, delta = new { role = "assistant", content = reply }, finish_reason = "stop" } } });
@@ -95,6 +108,7 @@ public sealed class ScanModuleCheckpointTests
             Assert.Equal(new[] { "beta" }, calls.ToArray());
             Assert.Equal(1, plan.ReusedModules);
             File.WriteAllText(Path.Combine(root.FullName, "alpha", "main.cs"), "different-worktree-content");
+            truncateBetaReply = true;
             await scan.GenerateAsync(workspace, language, plan, default);
             var docs = await context.DocFiles.ToListAsync();
             Assert.Equal(2, docs.Count);
@@ -125,6 +139,35 @@ public sealed class ScanModuleCheckpointTests
                 });
             Assert.Equal(alphaId, (await context.DocCatalogs.SingleAsync(row => row.Path == alpha.Page)).DocFileId);
             Assert.NotNull(betaCatalog.DocFileId);
+
+            // Older plans may contain empty files, whose page numbers must be preserved.
+            var emptyModule = new ScanModule("empty", "Empty", ["empty.txt"], ["empty.txt"], ["entry?"], [], []);
+            File.WriteAllText(Path.Combine(root.FullName, "empty.txt"), "");
+            var emptyPage = "scan-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("empty")))[..16].ToLowerInvariant() + "/1";
+            var legacyPlan = plan with { Modules = [.. plan.Modules, emptyModule] };
+            var savedAlpha = await context.DocFiles.FindAsync(alphaId);
+            var savedContent = savedAlpha!.Content;
+            betaCatalog.DocFileId = null;
+            const string missing = "模型未生成有效文档";
+            progress.Batches.Clear();
+            progress.Batches.AddRange([alpha with { Gaps = ["keep this draft"] }, beta with { Gaps = [missing] },
+                new ScanBatchResult("empty", emptyPage, [], [missing], 0)]);
+            language.DeepScanProgressJson = JsonSerializer.Serialize(progress, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await context.SaveChangesAsync();
+            generationCalls.Clear();
+            truncateBetaReply = true;
+
+            await scan.GenerateAsync(workspace, language, legacyPlan, default);
+
+            Assert.Equal(new[] { "beta", "beta" }, generationCalls.Select(call => call.Root));
+            Assert.Equal(savedContent, savedAlpha.Content);
+            var resumed = DeepRepositoryScan.ReadProgress(language.DeepScanProgressJson)!;
+            Assert.NotNull(resumed.FinishedAt);
+            Assert.True(resumed.Batches.Single(batch => batch.Page == emptyPage).SkippedEmpty);
+            Assert.NotNull(betaCatalog.DocFileId);
+            var recoveredBeta = await context.DocFiles.FindAsync(betaCatalog.DocFileId);
+            Assert.Contains("# Recovered page", recoveredBeta!.Content);
+            Assert.DoesNotContain(DeepRepositoryScan.PageEndMarker, recoveredBeta.Content);
 
             workspace.CommitId = "version-two";
             calls.Clear();
